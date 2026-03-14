@@ -190,17 +190,7 @@ function PaletteCanvas({ drops, version, totalCount, animDrop, onAnimDone }) {
 const dateKey = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 const getTodayKey = () => dateKey(new Date());
 
-// ─────────────────────────────────────────────
-// localStorage persistence
-// ─────────────────────────────────────────────
-const LS = {
-  get: (key, fallback) => {
-    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
-  },
-  set: (key, val) => {
-    try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
-  },
-};
+
 
 // ─────────────────────────────────────────────
 // Initial data
@@ -369,15 +359,27 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
             display: "flex", alignItems: "center", justifyContent: "center",
           }}>+</button>
         </div>
-        {/* list */}
+        {/* list with drag-to-reorder */}
         {categories.length === 0 && <div style={{ textAlign: "center", color: C.dim, fontSize: 13, padding: "20px 0" }}>아직 카테고리가 없어요</div>}
-        {categories.map(cat => (
-          <div key={cat.id} style={{
-            display: "flex", alignItems: "center", gap: 12,
-            padding: "13px 14px", marginBottom: 6,
-            background: C.card, borderRadius: radius.md,
-            border: `1px solid ${C.border}`,
-          }}>
+        {categories.map((cat, idx) => (
+          <div key={cat.id}
+            draggable
+            onDragStart={e => e.dataTransfer.setData("catIdx", idx)}
+            onDragOver={e => e.preventDefault()}
+            onDrop={e => {
+              const from = Number(e.dataTransfer.getData("catIdx"));
+              if (from === idx) return;
+              const next = [...categories];
+              next.splice(idx, 0, next.splice(from, 1)[0]);
+              setCategories(next);
+            }}
+            style={{
+              display: "flex", alignItems: "center", gap: 12,
+              padding: "13px 14px", marginBottom: 6,
+              background: C.card, borderRadius: radius.md,
+              border: `1px solid ${C.border}`, cursor: "grab",
+            }}>
+            <span style={{ fontSize: 14, color: C.dim, cursor: "grab", flexShrink: 0, letterSpacing: "0.05em" }}>⠿</span>
             <div style={{ width: 10, height: 10, borderRadius: "50%", background: cat.color, boxShadow: `0 0 8px ${cat.color}88`, flexShrink: 0 }} />
             <span style={{ flex: 1, color: C.text, fontSize: 14 }}>{cat.name}</span>
             <button onClick={() => delCat(cat.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 16, padding: 0, lineHeight: 1 }}>✕</button>
@@ -451,9 +453,96 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
 }
 
 // ─────────────────────────────────────────────
+// FlyingOrb — 검정 원이 팔레트 위치로 날아가는 Canvas 애니메이션
+// ─────────────────────────────────────────────
+function FlyingOrb({ sx, sy, tx, ty, drops, totalCount }) {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    const W = window.innerWidth, H = window.innerHeight;
+    canvas.width = W; canvas.height = H;
+
+    // Orb starts white-ish (from BLACK screen), shrinks and darkens as it flies
+    const FRAMES = 30; // ~480ms at 60fps
+    let frame = 0;
+    let raf;
+
+    // Bezier control point — arc upward slightly for natural trajectory
+    const cx1 = sx + (tx - sx) * 0.3;
+    const cy1 = Math.min(sy, ty) - Math.abs(tx - sx) * 0.25;
+
+    function bezier(t, p0, p1, p2) {
+      return (1-t)*(1-t)*p0 + 2*(1-t)*t*p1 + t*t*p2;
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      const t  = frame / FRAMES;
+      const et = 1 - Math.pow(1 - t, 3); // ease-out
+
+      const x  = bezier(et, sx, cx1, tx);
+      const y  = bezier(et, sy, cy1, ty);
+
+      // Size: 40px → 16px
+      const r  = 40 - et * 24;
+      // Color: white → black
+      const lum = Math.round(255 * (1 - et));
+      // Opacity: stays full until 80%, then fades
+      const alpha = t < 0.8 ? 1 : 1 - (t - 0.8) / 0.2;
+
+      // Glow
+      if (lum > 80) {
+        const glow = ctx.createRadialGradient(x, y, 0, x, y, r * 2.5);
+        glow.addColorStop(0, `rgba(${lum},${lum},${lum},${alpha * 0.25})`);
+        glow.addColorStop(1, "transparent");
+        ctx.beginPath(); ctx.arc(x, y, r * 2.5, 0, Math.PI*2);
+        ctx.fillStyle = glow; ctx.fill();
+      }
+
+      // Main orb
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${lum},${lum},${lum},${alpha})`;
+      ctx.fill();
+
+      // Trailing tail — small faded circles behind
+      for (let i = 1; i <= 3; i++) {
+        const tt = Math.max(0, et - i * 0.06);
+        const tx2 = bezier(tt, sx, cx1, tx);
+        const ty2 = bezier(tt, sy, cy1, ty);
+        const tr = r * (1 - i * 0.2);
+        const ta = alpha * (0.25 - i * 0.07);
+        if (tr > 0 && ta > 0) {
+          ctx.beginPath();
+          ctx.arc(tx2, ty2, tr, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${lum},${lum},${lum},${ta})`;
+          ctx.fill();
+        }
+      }
+
+      frame++;
+      if (frame <= FRAMES) raf = requestAnimationFrame(draw);
+      else ctx.clearRect(0, 0, W, H);
+    }
+
+    raf = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <canvas ref={canvasRef} style={{
+      position: "fixed", inset: 0, zIndex: 350, pointerEvents: "none",
+    }} />
+  );
+}
+
+// ─────────────────────────────────────────────
 // Home Screen
 // ─────────────────────────────────────────────
-function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory }) {
+function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, todosByDate, setTodosByDate }) {
   // Dynamic today — refreshes at midnight
   const [todayKey, setTodayKey]         = useState(getTodayKey);
   useEffect(() => {
@@ -463,20 +552,26 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
   }, [todayKey]);
 
   const [showCatMgr,   setShowCatMgr]   = useState(false);
-  const [cats, setCats]   = useState(() => LS.get("mb_cats", categories));
-  const [ruts, setRuts]   = useState(() => LS.get("mb_ruts", routines));
+  const [cats, setCats]   = useState(categories);
+  const [ruts, setRuts]   = useState(routines);
   const [selectedDate, setSelectedDate] = useState(getTodayKey);
   const [viewMonth, setViewMonth]       = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
-  const [todosByDate, setTodosByDate]   = useState(() => LS.get("mb_todos", {}));
-  const [toast, setToast]               = useState(null); // { msg, undoFn }
   const [addingTo, setAddingTo]         = useState(null);
   const [newTodoText, setNewTodoText]   = useState("");
+  const [editingTodo, setEditingTodo]   = useState(null); // {catId, todoId, text}
+  const editInputRef = useRef(null);
   const [animDrop, setAnimDrop]         = useState(null);
   const [canvasVer, setCanvasVer]       = useState(0);
-  const [blackDone, setBlackDone]       = useState(false);
+  const [blackPhase, setBlackPhase]     = useState(null); // null | "in" | "out"
   const [usedHues, setUsedHues]         = useState([]);
   const [showCal, setShowCal]           = useState(false);
-  const inputRef = useRef(null);
+  const [calClosing, setCalClosing]     = useState(false);
+  const [flyOrb, setFlyOrb]             = useState(null);
+  const [stampDate, setStampDate]       = useState(null);
+  const targetCellRef = useRef(null);  // ref on the selected date cell in calendar
+  const paletteAreaRef = useRef(null);
+  const inputRef  = useRef(null);
+  const blackTimer = useRef(null);
 
   const selDateObj = new Date(selectedDate + "T00:00:00");
 
@@ -488,8 +583,16 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
       const dow = new Date(dk + "T00:00:00").getDay();
       if (!rut.days.includes(dow) && !rut.dates.includes(dk)) return;
       const catTodos = result[rut.catId] || [];
-      if (!catTodos.some(t => t.routineId === rut.id)) {
-        result[rut.catId] = [{ id: `r${rut.id}-${dk}`, text: rut.name, done: false, routineId: rut.id, hue: 0, rgb: [160,160,160], color: "#888", seed: rut.id * 7 }, ...catTodos];
+      const routineTodoId = `r${rut.id}-${dk}`;
+      const existing = catTodos.find(t => t.id === routineTodoId);
+      if (!existing) {
+        // 저장된 완료 상태 복원 (날짜별로 독립적으로 저장됨)
+        const saved = (todosByDate[dk]?.[rut.catId] || []).find(t => t.id === routineTodoId);
+        result[rut.catId] = [{
+          id: routineTodoId, text: rut.name,
+          done: saved?.done ?? false,
+          routineId: rut.id, hue: 0, rgb: [160,160,160], color: "#888", seed: rut.id * 7
+        }, ...catTodos];
       }
     });
     return result;
@@ -504,18 +607,52 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
   const histEntry  = paletteHistory[selectedDate] || { drops: [], total: 0 };
   const drops      = histEntry.drops || [];
 
-  useEffect(() => { if (isBlack && !blackDone) setBlackDone(true); }, [isBlack]);
-  useEffect(() => { setBlackDone(false); setCanvasVer(v => v + 1); }, [selectedDate]);
-  useEffect(() => { LS.set("mb_cats", cats); }, [cats]);
-  useEffect(() => { LS.set("mb_ruts", ruts); }, [ruts]);
-  useEffect(() => { LS.set("mb_todos", todosByDate); }, [todosByDate]);
-  useEffect(() => { LS.set("mb_palette", paletteHistory); }, [paletteHistory]);
+  useEffect(() => {
+    if (isBlack && blackPhase === null) {
+      setBlackPhase("in");
+      clearTimeout(blackTimer.current);
+      blackTimer.current = setTimeout(() => {
+        // ── 1. 오버레이 fade-out 시작 ──
+        setBlackPhase("out");
+        // ── 2. fade-out 시작 직후(150ms) 캘린더 열기 ──
+        blackTimer.current = setTimeout(() => {
+          setShowCal(true);
+          // ── 3. 캘린더 거의 열린 시점(250ms)에 orb 발사 ──
+          blackTimer.current = setTimeout(() => {
+            setBlackPhase(null);
+            const vw = window.innerWidth, vh = window.innerHeight;
+            const cellEl = targetCellRef.current;
+            const rect = cellEl?.getBoundingClientRect();
+            const tx = rect ? rect.left + rect.width / 2 : vw / 2;
+            const ty = rect ? rect.top  + rect.height / 2 : 120;
+            setFlyOrb({ sx: vw / 2, sy: vh / 2, tx, ty });
+            // ── 4. orb 착지 후 stamp ──
+            blackTimer.current = setTimeout(() => {
+              setFlyOrb(null);
+              setStampDate(selectedDate);
+              // ── 5. stamp 후 캘린더 닫기 ──
+              blackTimer.current = setTimeout(() => {
+                setStampDate(null);
+                closeCalendar();
+              }, 400);
+            }, 480);
+          }, 250);
+        }, 150);
+      }, 1000);
+    }
+  }, [isBlack]);
+  const closeCalendar = (cb) => {
+    setCalClosing(true);
+    setTimeout(() => { setShowCal(false); setCalClosing(false); if (cb) cb(); }, 220);
+  };
+  useEffect(() => { setBlackPhase(null); clearTimeout(blackTimer.current); setCanvasVer(v => v + 1); }, [selectedDate]);
 
   const toggleTodo = (catId, todoId) => {
     const dk = selectedDate;
     const todo = (selTodos[catId] || []).find(t => t.id === todoId);
     if (!todo) return;
     const willDone = !todo.done;
+    // 완료 → 미완료: 팔레트 drop도 제거되니 의도적 동작임을 보장
     setTodosByDate(prev => {
       const base = prev[dk] || {};
       const allCat = selTodos[catId] || [];
@@ -523,24 +660,19 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
       return { ...prev, [dk]: { ...base, [catId]: mapped } };
     });
     setPaletteHistory(prev => {
-      const entry = prev[dk] || { drops: [], total: totalCount };
+      const entry = prev[dk] || { drops: [], total: 0 };
+      // total을 항상 현재 allTodos.length로 동기화
+      const syncedTotal = allTodos.length;
       if (willDone) {
         if (entry.drops.some(d => d.id === todoId)) return prev;
         const { hue, rgb, color } = generateUniqueColor(entry.drops.map(d => d.hue));
         const seed = uid() * 17;
         const drop = { id: todoId, hue, rgb, color, px: 0.12 + Math.random() * 0.76, py: 0.12 + Math.random() * 0.76, seed };
         setAnimDrop(drop); setCanvasVer(v => v + 1);
-        // Undo toast
-        const snapshot = { todoState: { ...prev }, paletteState: prev };
-        setToast({ msg: `"${todo.text}" 완료!`, undoFn: () => {
-          setTodosByDate(s => { const b = s[dk]||{}; const mapped2 = (selTodos[catId]||[]).map(t => t.id===todoId?{...t,done:false}:t); return {...s,[dk]:{...b,[catId]:mapped2}}; });
-          setPaletteHistory(p => { const e2 = p[dk]||{drops:[]}; return {...p,[dk]:{...e2,drops:e2.drops.filter(d=>d.id!==todoId)}}; });
-          setCanvasVer(v => v + 1);
-        }});
-        return { ...prev, [dk]: { drops: [...entry.drops, drop], total: totalCount } };
+        return { ...prev, [dk]: { drops: [...entry.drops, drop], total: syncedTotal } };
       } else {
-        setCanvasVer(v => v + 1); setBlackDone(false);
-        return { ...prev, [dk]: { ...entry, drops: entry.drops.filter(d => d.id !== todoId) } };
+        setCanvasVer(v => v + 1); setBlackPhase(null); clearTimeout(blackTimer.current);
+        return { ...prev, [dk]: { ...entry, drops: entry.drops.filter(d => d.id !== todoId), total: syncedTotal } };
       }
     });
   };
@@ -570,6 +702,18 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
     setCanvasVer(v => v + 1);
   };
 
+  const saveEdit = () => {
+    if (!editingTodo) return;
+    const { catId, todoId, text } = editingTodo;
+    if (!text.trim()) { setEditingTodo(null); return; }
+    setTodosByDate(prev => {
+      const base = prev[selectedDate] || {};
+      const list = (base[catId] || []).map(t => t.id === todoId ? { ...t, text: text.trim() } : t);
+      return { ...prev, [selectedDate]: { ...base, [catId]: list } };
+    });
+    setEditingTodo(null);
+  };
+
   // Calendar — driven by viewMonth, independent of selectedDate
   const calYear     = viewMonth.y;
   const calMonth    = viewMonth.m;
@@ -593,6 +737,37 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
   const mixedCss = mixedHsl ? `hsl(${mixedHsl[0]|0},${mixedHsl[1]|0}%,${mixedHsl[2]|0}%)` : null;
   const isToday  = selectedDate === todayKey;
 
+  // ── 팔레트 이미지 공유 ──
+  const sharePalette = () => {
+    // 오프스크린 캔버스에 팔레트 + 날짜 텍스트 렌더
+    const SIZE = 600;
+    const cv = document.createElement("canvas");
+    cv.width = SIZE; cv.height = SIZE + 80;
+    const ctx = cv.getContext("2d");
+    // 배경
+    ctx.fillStyle = "#0a0a0a";
+    ctx.fillRect(0, 0, SIZE, SIZE + 80);
+    // 팔레트
+    const tmp = document.createElement("canvas");
+    tmp.width = SIZE; tmp.height = SIZE;
+    renderPalette(tmp, drops, totalCount, SIZE);
+    ctx.drawImage(tmp, 0, 0);
+    // 날짜 텍스트
+    ctx.fillStyle = "#f0ece6";
+    ctx.font = "bold 22px -apple-system, sans-serif";
+    ctx.textAlign = "center";
+    const label = isToday ? "오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" });
+    ctx.fillText(`${label}의 팔레트`, SIZE / 2, SIZE + 34);
+    ctx.fillStyle = "#555";
+    ctx.font = "14px -apple-system, sans-serif";
+    ctx.fillText(`MakeBlack · ${doneCount}/${totalCount} 완료`, SIZE / 2, SIZE + 60);
+    // 다운로드
+    const a = document.createElement("a");
+    a.href = cv.toDataURL("image/png");
+    a.download = `makeblack-${selectedDate}.png`;
+    a.click();
+  };
+
   // Gradient progress bar: left=first drop color, right=mixed color, darkens toward black
   const progressGradient = (() => {
     if (drops.length === 0) return C.border;
@@ -606,19 +781,58 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
     <div style={{ height: "100dvh", background: C.bg, color: C.text, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
       {/* ── BLACK overlay ── */}
-      {blackDone && (
-        <div onClick={() => setBlackDone(false)} style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.97)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", animation: "fadeIn 1.2s ease", cursor: "pointer" }}>
-          <div style={{ fontSize: 88, lineHeight: 1, animation: "pulse 2.8s ease-in-out infinite" }}>●</div>
-          <div style={{ fontSize: 28, letterSpacing: "0.55em", color: "#fff", fontWeight: 200, marginTop: 28 }}>BLACK</div>
-          <div style={{ fontSize: 12, color: "#383838", marginTop: 14, letterSpacing: "0.12em" }}>모든 색이 하나가 됐어요</div>
-          <div style={{ fontSize: 10, color: "#1c1c1c", marginTop: 56 }}>tap to close</div>
+      {blackPhase && (
+        <div onClick={() => {
+            clearTimeout(blackTimer.current);
+            setBlackPhase("out");
+            blackTimer.current = setTimeout(() => {
+              setShowCal(true);
+              blackTimer.current = setTimeout(() => {
+                setBlackPhase(null);
+                const vw = window.innerWidth, vh = window.innerHeight;
+                const cellEl = targetCellRef.current;
+                const rect = cellEl?.getBoundingClientRect();
+                const tx = rect ? rect.left + rect.width / 2 : vw / 2;
+                const ty = rect ? rect.top  + rect.height / 2 : 120;
+                setFlyOrb({ sx: vw/2, sy: vh/2, tx, ty });
+                blackTimer.current = setTimeout(() => {
+                  setFlyOrb(null);
+                  setStampDate(selectedDate);
+                  blackTimer.current = setTimeout(() => {
+                    setStampDate(null); closeCalendar();
+                  }, 400);
+                }, 480);
+              }, 250);
+            }, 150);
+          }}
+          style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.97)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: "pointer",
+            animation: blackPhase === "in" ? "blackIn 0.4s cubic-bezier(0.22,1,0.36,1) forwards" : "blackOut 0.45s ease forwards" }}>
+          {/* ● 흰→검정 전환 */}
+          <div style={{
+            width: 80, height: 80, borderRadius: "50%", marginBottom: 28, flexShrink: 0,
+            background: blackPhase === "out" ? "#000" : "#fff",
+            boxShadow: blackPhase === "out" ? "none" : "0 0 40px rgba(255,255,255,0.4)",
+            transition: "background 0.5s ease, box-shadow 0.5s ease",
+            animation: blackPhase === "in" ? "pulse 2s 0.4s ease-in-out infinite" : "none",
+          }} />
+          <div style={{ fontSize: 28, letterSpacing: "0.55em", color: "#fff", fontWeight: 200 }}>BLACK</div>
+          <div style={{ fontSize: 12, color: "#555", marginTop: 14, letterSpacing: "0.12em" }}>모든 색이 하나가 됐어요</div>
         </div>
+      )}
+
+      {/* ── Flying orb (BLACK → palette) ── */}
+      {flyOrb && (
+        <FlyingOrb
+          sx={flyOrb.sx} sy={flyOrb.sy}
+          tx={flyOrb.tx} ty={flyOrb.ty}
+          drops={drops} totalCount={totalCount}
+        />
       )}
 
       {/* ── Calendar sheet ── */}
       {showCal && (
-        <div style={{ position: "fixed", inset: 0, zIndex: 150, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(10px)" }} onClick={() => setShowCal(false)}>
-          <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#111", borderRadius: "0 0 28px 28px", padding: "20px 18px 28px", animation: "slideDown 0.22s ease" }}>
+        <div style={{ position: "fixed", inset: 0, zIndex: 150, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(10px)" }} onClick={() => closeCalendar()}>
+          <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#111", borderRadius: "0 0 28px 28px", padding: "20px 18px 28px", animation: calClosing ? "slideUp 0.3s cubic-bezier(0.4,0,0.6,1) forwards" : "slideDown 0.2s cubic-bezier(0.22,1,0.36,1)" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
               <button onClick={() => goMonth(-1)} style={{ width: 34, height: 34, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 18, fontFamily: "inherit" }}>‹</button>
               <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em" }}>{calYear}년 {monthName}</span>
@@ -640,8 +854,13 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
                 const prog  = hist?.total > 0 ? (hist.drops?.length||0) / hist.total : 0;
                 const isDone = prog >= 1 && hist?.total > 0;
                 return (
-                  <div key={day} onClick={() => { setSelectedDate(dk); setShowCal(false); }} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "pointer", padding: "3px 1px", borderRadius: radius.sm, background: isSel ? "#222" : "transparent", transition: "background 0.15s" }}>
-                    <div style={{ position: "relative", width: 30, height: 30 }}>
+                  <div key={day} ref={isSel ? targetCellRef : null} onClick={() => { setSelectedDate(dk); closeCalendar(); }} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "pointer", padding: "3px 1px", borderRadius: radius.sm, background: isSel ? "#222" : "transparent", transition: "background 0.15s" }}>
+                    <div style={{ position: "relative", width: 30, height: 30,
+                      animation: stampDate === dk ? "stamp 0.55s cubic-bezier(0.36,0.07,0.19,0.97) both" : "none" }}>
+                      {/* Ripple ring on stamp */}
+                      {stampDate === dk && (
+                        <div style={{ position: "absolute", inset: -4, borderRadius: "50%", border: "1.5px solid rgba(255,255,255,0.6)", animation: "ripple 0.7s 0.15s ease-out forwards", pointerEvents: "none" }} />
+                      )}
                       {hist?.drops?.length > 0
                         ? <>
                             <CalendarPalette drops={hist.drops} totalCount={hist.total} size={30} />
@@ -689,12 +908,13 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
               {isBlack ? "●" : totalCount > 0 ? `${progress}%` : "—"}
             </div>
             <button onClick={() => setShowCal(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>캘린더</button>
+            <button onClick={sharePalette} disabled={drops.length === 0} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: drops.length > 0 ? C.muted : C.dim, cursor: drops.length > 0 ? "pointer" : "default", fontSize: 11, fontFamily: "inherit", opacity: drops.length > 0 ? 1 : 0.4 }}>공유</button>
             <button onClick={() => setShowCatMgr(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>카테고리</button>
           </div>
         </div>
 
         {/* 팔레트 캔버스 */}
-        <div style={{ width: "min(52vw, 200px)", aspectRatio: "1", borderRadius: radius.lg, overflow: "hidden", border: `1px solid ${C.border}`, position: "relative", margin: "0 auto" }}>
+        <div ref={paletteAreaRef} style={{ width: "min(52vw, 200px)", aspectRatio: "1", borderRadius: radius.lg, overflow: "hidden", border: `1px solid ${C.border}`, position: "relative", margin: "0 auto" }}>
           <PaletteCanvas drops={drops} version={canvasVer} totalCount={totalCount} animDrop={animDrop} onAnimDone={() => setAnimDrop(null)} />
           {drops.length === 0 && (
             <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
@@ -733,14 +953,6 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
 
       {/* ══ TODO LIST (하단 스크롤) ══ */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 18px 100px" }}>
-        {/* Toast */}
-        {toast && (
-          <div style={{ position: "fixed", bottom: 82, left: "50%", transform: "translateX(-50%)", zIndex: 250, background: "#1e1e1e", border: "1px solid #2a2a2a", borderRadius: radius.full, padding: "10px 16px", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 4px 24px rgba(0,0,0,0.6)", animation: "fadeIn 0.2s ease", whiteSpace: "nowrap" }}>
-            <span style={{ fontSize: 12, color: "#d0ccc6" }}>{toast.msg}</span>
-            <button onClick={() => { toast.undoFn(); setToast(null); }} style={{ fontSize: 11, color: "#6c8fff", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>실행 취소</button>
-          </div>
-        )}
-
         {cats.length === 0 && (
           <div style={{ textAlign: "center", padding: "48px 24px", color: C.dim }}>
             <div style={{ fontSize: 36, marginBottom: 14 }}>🎨</div>
@@ -766,18 +978,40 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
               </div>
 
               <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                {todos.map(todo => (
-                  <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: todo.done ? "transparent" : C.card, borderRadius: radius.md, border: `1px solid ${todo.done ? C.border : C.border2}`, opacity: todo.done ? 0.42 : 1, transition: "all 0.25s" }}>
-                    <div onClick={() => toggleTodo(cat.id, todo.id)} style={{ width: 20, height: 20, borderRadius: "50%", flexShrink: 0, cursor: "pointer", border: `2px solid ${todo.done ? todo.color : C.border2}`, background: todo.done ? todo.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s" }}>
-                      {todo.done && <span style={{ color: "#080808", fontSize: 10, fontWeight: 800 }}>✓</span>}
+                {todos.map(todo => {
+                  const isEditing = editingTodo?.todoId === todo.id;
+                  return (
+                    <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: isEditing ? C.surface : todo.done ? "transparent" : C.card, borderRadius: radius.md, border: `1px solid ${isEditing ? C.border2 : todo.done ? C.border : C.border2}`, opacity: todo.done && !isEditing ? 0.42 : 1, transition: "all 0.2s" }}>
+                      {/* 체크박스 */}
+                      <div onClick={() => !isEditing && toggleTodo(cat.id, todo.id)} style={{ width: 20, height: 20, borderRadius: "50%", flexShrink: 0, cursor: isEditing ? "default" : "pointer", border: `2px solid ${todo.done ? todo.color : C.border2}`, background: todo.done ? todo.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s" }}>
+                        {todo.done && <span style={{ color: "#080808", fontSize: 10, fontWeight: 800 }}>✓</span>}
+                      </div>
+                      {/* 텍스트 or 편집 인풋 */}
+                      {isEditing ? (
+                        <input
+                          ref={editInputRef}
+                          value={editingTodo.text}
+                          onChange={e => setEditingTodo(et => ({ ...et, text: e.target.value }))}
+                          onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingTodo(null); }}
+                          onBlur={saveEdit}
+                          autoFocus
+                          style={{ flex: 1, background: "transparent", border: "none", outline: "none", fontSize: 13, color: C.text, fontFamily: "inherit", padding: 0 }}
+                        />
+                      ) : (
+                        <span
+                          onDoubleClick={() => !todo.done && !todo.routineId && setEditingTodo({ catId: cat.id, todoId: todo.id, text: todo.text })}
+                          style={{ flex: 1, fontSize: 13, color: todo.done ? C.muted : C.text, textDecoration: todo.done ? "line-through" : "none", cursor: todo.done || todo.routineId ? "default" : "text" }}
+                        >{todo.text}</span>
+                      )}
+                      {todo.routineId && <span style={{ fontSize: 9, color: C.dim, background: C.surface, padding: "2px 6px", borderRadius: 4, flexShrink: 0 }}>루틴</span>}
+                      {isEditing ? (
+                        <button onClick={saveEdit} style={{ background: "none", border: "none", color: "#6c8fff", cursor: "pointer", fontSize: 11, fontFamily: "inherit", flexShrink: 0, fontWeight: 600 }}>저장</button>
+                      ) : !todo.routineId ? (
+                        <button onClick={() => deleteTodo(cat.id, todo.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1, flexShrink: 0 }}>✕</button>
+                      ) : null}
                     </div>
-                    <span style={{ flex: 1, fontSize: 13, color: todo.done ? C.muted : C.text, textDecoration: todo.done ? "line-through" : "none", transition: "all 0.2s" }}>{todo.text}</span>
-                    {todo.routineId && <span style={{ fontSize: 9, color: C.dim, background: C.surface, padding: "2px 6px", borderRadius: 4 }}>루틴</span>}
-                    {!todo.routineId && (
-                      <button onClick={() => deleteTodo(cat.id, todo.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }}>✕</button>
-                    )}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
 
               {addingTo === cat.id && (
@@ -801,6 +1035,140 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
 }
 
 // ─────────────────────────────────────────────
+// MyPage — 통계 화면
+// ─────────────────────────────────────────────
+function MyPageScreen({ paletteHistory, todosByDate, categories }) {
+  const now   = new Date();
+  const year  = now.getFullYear();
+  const month = now.getMonth();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+  // 이번 달 데이터 집계
+  const monthStats = Array.from({ length: daysInMonth }, (_, i) => {
+    const dk = `${year}-${String(month+1).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`;
+    const hist   = paletteHistory[dk];
+    const byDate = todosByDate[dk] || {};
+    const allT   = Object.values(byDate).flat();
+    const done   = allT.filter(t => t.done).length;
+    const total  = hist?.total || allT.length;
+    const prog   = total > 0 ? done / total : 0;
+    return { dk, day: i+1, prog, done, total, drops: hist?.drops || [], isBlack: prog >= 1 && total > 0 };
+  });
+
+  const activeDays   = monthStats.filter(d => d.total > 0);
+  const blackDays    = monthStats.filter(d => d.isBlack);
+  const avgProgress  = activeDays.length > 0 ? Math.round(activeDays.reduce((s, d) => s + d.prog, 0) / activeDays.length * 100) : 0;
+  const totalDone    = monthStats.reduce((s, d) => s + d.done, 0);
+  const streak       = (() => {
+    let s = 0;
+    for (let i = now.getDate() - 1; i >= 0; i--) {
+      if (monthStats[i]?.isBlack) s++; else break;
+    }
+    return s;
+  })();
+
+  // 요일별 완료율
+  const byDow = Array.from({ length: 7 }, (_, dow) => {
+    const days = monthStats.filter(d => new Date(d.dk + "T00:00:00").getDay() === dow && d.total > 0);
+    const avg  = days.length > 0 ? days.reduce((s, d) => s + d.prog, 0) / days.length : 0;
+    return { dow, avg, count: days.length };
+  });
+  const DOW_KR = ["일","월","화","수","목","금","토"];
+
+  const monthName = now.toLocaleString("ko-KR", { month: "long" });
+
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", padding: "28px 20px 100px" }}>
+      {/* 헤더 */}
+      <div style={{ marginBottom: 28 }}>
+        <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase", marginBottom: 4 }}>makeblack</div>
+        <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.03em" }}>{year}년 {monthName}</div>
+      </div>
+
+      {/* 핵심 수치 4개 */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
+        {[
+          { label: "완료한 할 일", value: totalDone, unit: "개" },
+          { label: "활동한 날",   value: activeDays.length, unit: "일" },
+          { label: "BLACK 달성",  value: blackDays.length, unit: "일" },
+          { label: "연속 달성",   value: streak, unit: "일 연속" },
+        ].map(({ label, value, unit }) => (
+          <div key={label} style={{ background: C.surface, borderRadius: radius.lg, padding: "16px 18px", border: `1px solid ${C.border}` }}>
+            <div style={{ fontSize: 10, color: C.muted, marginBottom: 8, letterSpacing: "0.06em" }}>{label}</div>
+            <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.03em", color: C.text, lineHeight: 1 }}>
+              {value}<span style={{ fontSize: 13, fontWeight: 400, color: C.muted, marginLeft: 4 }}>{unit}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* 이번 달 평균 진행률 */}
+      <div style={{ background: C.surface, borderRadius: radius.lg, padding: "18px", marginBottom: 16, border: `1px solid ${C.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+          <span style={{ fontSize: 12, color: C.muted }}>이번 달 평균 완료율</span>
+          <span style={{ fontSize: 20, fontWeight: 700, color: C.text }}>{avgProgress}%</span>
+        </div>
+        <div style={{ height: 6, background: C.card, borderRadius: 4, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${avgProgress}%`, borderRadius: 4, background: `linear-gradient(90deg, #6c8fff, #c77dff)`, transition: "width 1s ease" }} />
+        </div>
+      </div>
+
+      {/* 요일별 완료율 바 차트 */}
+      <div style={{ background: C.surface, borderRadius: radius.lg, padding: "18px", marginBottom: 16, border: `1px solid ${C.border}` }}>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 16 }}>요일별 평균 완료율</div>
+        <div style={{ display: "flex", gap: 6, alignItems: "flex-end", height: 80 }}>
+          {byDow.map(({ dow, avg, count }) => (
+            <div key={dow} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+              <div style={{ width: "100%", background: C.card, borderRadius: 4, height: 64, display: "flex", alignItems: "flex-end", overflow: "hidden" }}>
+                <div style={{
+                  width: "100%", borderRadius: 4,
+                  height: `${Math.max(avg * 100, count > 0 ? 4 : 0)}%`,
+                  background: dow === 0 ? "#ff7070" : dow === 6 ? "#7090ff" : "#6c8fff",
+                  opacity: count > 0 ? 0.85 : 0.15,
+                  transition: "height 0.8s ease",
+                }} />
+              </div>
+              <span style={{ fontSize: 10, color: dow===0?"#ff7070":dow===6?"#7090ff":C.muted }}>{DOW_KR[dow]}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 이달 달력 히트맵 */}
+      <div style={{ background: C.surface, borderRadius: radius.lg, padding: "18px", border: `1px solid ${C.border}` }}>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>이달 진행 현황</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 8 }}>
+          {DOW_KR.map((d, i) => (
+            <div key={d} style={{ textAlign: "center", fontSize: 9, color: i===0?"#ff7070":i===6?"#7090ff":C.dim }}>{d}</div>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
+          {Array.from({ length: new Date(year, month, 1).getDay() }).map((_, i) => <div key={`e${i}`} />)}
+          {monthStats.map(({ day, prog, isBlack, drops, total }) => {
+            const alpha = prog > 0 ? 0.2 + prog * 0.8 : 0;
+            const bg    = isBlack ? "#fff" : prog > 0 ? `rgba(108,143,255,${alpha})` : C.card;
+            return (
+              <div key={day} style={{ aspectRatio: "1", borderRadius: 6, background: bg, display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.3s", position: "relative" }}>
+                <span style={{ fontSize: 9, color: isBlack ? "#080808" : prog > 0.5 ? "#fff" : C.muted, fontWeight: isBlack ? 700 : 400 }}>{day}</span>
+                {isBlack && <div style={{ position: "absolute", inset: 0, borderRadius: 6, border: "1px solid rgba(255,255,255,0.4)" }} />}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
+          <div style={{ width: 10, height: 10, borderRadius: 2, background: C.card, border: `1px solid ${C.border}` }} />
+          <span style={{ fontSize: 10, color: C.dim }}>활동 없음</span>
+          <div style={{ width: 10, height: 10, borderRadius: 2, background: "rgba(108,143,255,0.6)" }} />
+          <span style={{ fontSize: 10, color: C.dim }}>진행 중</span>
+          <div style={{ width: 10, height: 10, borderRadius: 2, background: "#fff" }} />
+          <span style={{ fontSize: 10, color: C.dim }}>BLACK 달성</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────
 // Placeholder screens
 // ─────────────────────────────────────────────
 function PlaceholderScreen({ label, icon }) {
@@ -812,7 +1180,6 @@ function PlaceholderScreen({ label, icon }) {
     </div>
   );
 }
-
 // ─────────────────────────────────────────────
 // Bottom Nav
 // ─────────────────────────────────────────────
@@ -836,10 +1203,10 @@ function BottomNav({ tab, setTab }) {
         return (
           <button key={it.key} onClick={() => setTab(it.key)} style={{
             flex: 1, background: "none", border: "none", cursor: "pointer",
-            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4,
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4, position: "relative",
           }}>
-            <span style={{ fontSize: 20, color: active ? C.text : "#2a2a2a", transition: "color 0.18s" }}>{it.icon}</span>
-            <span style={{ fontSize: 9, color: active ? C.text : "#2a2a2a", letterSpacing: "0.04em", transition: "color 0.18s" }}>{it.label}</span>
+            <span style={{ fontSize: 20, color: active ? C.text : "#333", transition: "color 0.18s" }}>{it.icon}</span>
+            <span style={{ fontSize: 9, color: active ? C.text : "#333", letterSpacing: "0.04em", transition: "color 0.18s" }}>{it.label}</span>
             {active && <div style={{ position: "absolute", bottom: 6, width: 3, height: 3, borderRadius: "50%", background: C.text }} />}
           </button>
         );
@@ -853,22 +1220,36 @@ function BottomNav({ tab, setTab }) {
 // ─────────────────────────────────────────────
 export default function MakeBlack() {
   const [tab, setTab]                       = useState("home");
-  const [showOnboarding, setShowOnboarding] = useState(() => !LS.get("mb_onboarded", false));
-  const [categories]                        = useState(() => LS.get("mb_cats", DEFAULT_CATEGORIES));
-  const [routines]                          = useState(() => LS.get("mb_ruts", DEFAULT_ROUTINES));
-  const [paletteHistory, setPaletteHistory] = useState(() => LS.get("mb_palette", {}));
+  const [showOnboarding, setShowOnboarding] = useState(true);
+  const [categories]                        = useState(DEFAULT_CATEGORIES);
+  const [routines]                          = useState(DEFAULT_ROUTINES);
+  const [paletteHistory, setPaletteHistory] = useState({});
+  const [todosByDate, setTodosByDate]       = useState({});
 
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", position: "relative", minHeight: "100vh", background: C.bg }}>
-      {showOnboarding && <OnboardingOverlay onDone={() => { LS.set("mb_onboarded", true); setShowOnboarding(false); }} />}
-      {!showOnboarding && tab === "home"    && <HomeScreen categories={categories} routines={routines} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} />}
+      {showOnboarding && <OnboardingOverlay onDone={() => { setShowOnboarding(false); }} />}
+      {!showOnboarding && tab === "home"    && <HomeScreen categories={categories} routines={routines} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} todosByDate={todosByDate} setTodosByDate={setTodosByDate} />}
       {tab === "search"  && <PlaceholderScreen label="검색" icon="◎" />}
       {tab === "friends" && <PlaceholderScreen label="친구" icon="◈" />}
-      {tab === "mypage"  && <PlaceholderScreen label="마이페이지" icon="◉" />}
+      {tab === "mypage"  && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} categories={categories} />}
       <BottomNav tab={tab} setTab={setTab} />
       <style>{`
         @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+        @keyframes blackIn { from { opacity: 0; transform: scale(1.04) } to { opacity: 1; transform: scale(1) } }
+        @keyframes blackOut { from { opacity: 1; transform: scale(1) } to { opacity: 0; transform: scale(0.97) } }
+        @keyframes stamp {
+          0%   { transform: scale(2.4); opacity: 0; }
+          45%  { transform: scale(0.85); opacity: 1; }
+          68%  { transform: scale(1.12); }
+          100% { transform: scale(1); opacity: 1; }
+        }
+        @keyframes ripple {
+          0%   { transform: scale(1); opacity: 0.6; }
+          100% { transform: scale(2.8); opacity: 0; }
+        }
         @keyframes slideDown { from { transform: translateX(-50%) translateY(-100%) } to { transform: translateX(-50%) translateY(0) } }
+        @keyframes slideUp { from { transform: translateX(-50%) translateY(0) } to { transform: translateX(-50%) translateY(-108%) } }
         @keyframes pulse  { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(1.08)} }
         input::placeholder { color: #2a2a2a; }
         select option { background: #111; }
