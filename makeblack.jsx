@@ -433,7 +433,6 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
   const [canvasVer, setCanvasVer]       = useState(0);
   const [blackDone, setBlackDone]       = useState(false);
   const [usedHues, setUsedHues]         = useState([]);
-  const [homeTab, setHomeTab]           = useState("palette"); // "palette" | "todos"
   const [showCal, setShowCal]           = useState(false);
   const inputRef = useRef(null);
 
@@ -577,9 +576,15 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
                       {hist?.drops?.length > 0
                         ? <>
                             <CalendarPalette drops={hist.drops} totalCount={hist.total} size={30} />
-                            <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: isDone ? "rgba(0,0,0,0.45)" : `rgba(0,0,0,${0.5-prog*0.5})`, border: isDone ? "1.5px solid rgba(255,255,255,0.5)" : "none", pointerEvents: "none" }} />
+                            <div style={{ position: "absolute", inset: 0, borderRadius: "50%",
+                              background: isDone ? "rgba(0,0,0,0.45)" : `rgba(0,0,0,${0.5 - prog*0.5})`,
+                              border: isDone ? "1.5px solid rgba(255,255,255,0.5)" : "none",
+                              pointerEvents: "none" }} />
                           </>
-                        : <div style={{ width: 30, height: 30, borderRadius: "50%", background: isTod ? "#1a1a1a" : "transparent", border: isSel ? `1px solid #444` : isTod ? `1px solid ${C.border2}` : "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                        : <div style={{ width: 30, height: 30, borderRadius: "50%",
+                            background: isTod ? "#1a1a1a" : "transparent",
+                            border: isTod ? `1px solid ${C.border2}` : isSel ? `1px solid #444` : "none",
+                            display: "flex", alignItems: "center", justifyContent: "center" }}>
                             {isTod && <div style={{ width: 4, height: 4, borderRadius: "50%", background: C.dim }} />}
                           </div>
                       }
@@ -593,130 +598,100 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
         </div>
       )}
 
-      {/* ══ HEADER ══ */}
-      <div style={{ flexShrink: 0, padding: "16px 20px 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        {/* Date button → opens calendar */}
-        <button onClick={() => setShowCal(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}>
-          <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase", marginBottom: 2 }}>makeblack</div>
-          <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.03em", color: C.text }}>
-            {isToday ? "오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" })}
-            <span style={{ fontSize: 12, color: C.dim, marginLeft: 6, fontWeight: 400 }}>{calYear}.{String(calMonth+1).padStart(2,"0")} ›</span>
+      {/* ══ PALETTE (상단 고정) ══ */}
+      <div style={{ flexShrink: 0, padding: "14px 18px 0" }}>
+        {/* 헤더 */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <div style={{ background: "none", border: "none", padding: 0, textAlign: "left" }}>
+            <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase" }}>makeblack</div>
+            <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em", color: C.text, marginTop: 1 }}>
+              {isToday ? "오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" })}
+              <span style={{ fontSize: 11, color: C.dim, marginLeft: 6, fontWeight: 400 }}>{calYear}.{String(calMonth+1).padStart(2,"0")} ›</span>
+            </div>
           </div>
-        </button>
-        {/* Right actions */}
-        <div style={{ display: "flex", gap: 6 }}>
-          <button onClick={() => setShowCatMgr(true)} style={{ height: 30, padding: "0 12px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>✦ 카테고리</button>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            {/* 진행률 pill */}
+            <div style={{ padding: "5px 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, fontSize: 11, fontWeight: 600, color: isBlack ? "#aaa" : mixedCss || C.dim, letterSpacing: "-0.01em" }}>
+              {isBlack ? "●" : totalCount > 0 ? `${progress}%` : "—"}
+            </div>
+            <button onClick={() => setShowCal(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>캘린더</button>
+            <button onClick={() => setShowCatMgr(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>카테고리</button>
+          </div>
         </div>
-      </div>
 
-      {/* ══ TAB BAR ══ */}
-      <div style={{ flexShrink: 0, padding: "14px 20px 0", display: "flex", gap: 6, alignItems: "center" }}>
-        {/* Palette tab */}
-        <button onClick={() => setHomeTab("palette")} style={{ position: "relative", flex: 1, padding: "10px 0", borderRadius: radius.lg, background: homeTab==="palette" ? C.surface : "transparent", border: `1px solid ${homeTab==="palette" ? C.border2 : "transparent"}`, cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s" }}>
-          <div style={{ fontSize: 12, color: homeTab==="palette" ? C.text : C.dim, fontWeight: homeTab==="palette" ? 600 : 400, transition: "color 0.2s" }}>팔레트</div>
-          {drops.length > 0 && (
-            <div style={{ position: "absolute", top: 8, right: 10, display: "flex", gap: 2 }}>
-              {drops.slice(0,5).map(d => <div key={d.id} style={{ width: 5, height: 5, borderRadius: "50%", background: d.color }} />)}
+        {/* 팔레트 캔버스 */}
+        <div style={{ width: "min(52vw, 200px)", aspectRatio: "1", borderRadius: radius.lg, overflow: "hidden", border: `1px solid ${C.border}`, position: "relative", margin: "0 auto" }}>
+          <PaletteCanvas drops={drops} version={canvasVer} totalCount={totalCount} animDrop={animDrop} onAnimDone={() => setAnimDrop(null)} />
+          {drops.length === 0 && (
+            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
+              <div style={{ fontSize: 11, color: "#1e1e1e", letterSpacing: "0.12em" }}>완료하면 색이 피어나요</div>
             </div>
           )}
-        </button>
-        {/* Progress pill in middle */}
-        <div style={{ padding: "6px 12px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, fontSize: 11, color: isBlack ? "#aaa" : mixedCss || C.dim, fontWeight: 600, minWidth: 52, textAlign: "center", letterSpacing: "-0.01em" }}>
-          {isBlack ? "●" : totalCount > 0 ? `${progress}%` : "—"}
         </div>
-        {/* Todos tab */}
-        <button onClick={() => setHomeTab("todos")} style={{ position: "relative", flex: 1, padding: "10px 0", borderRadius: radius.lg, background: homeTab==="todos" ? C.surface : "transparent", border: `1px solid ${homeTab==="todos" ? C.border2 : "transparent"}`, cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s" }}>
-          <div style={{ fontSize: 12, color: homeTab==="todos" ? C.text : C.dim, fontWeight: homeTab==="todos" ? 600 : 400, transition: "color 0.2s" }}>할 일</div>
+
+        {/* 색 도트 + 완료 카운트 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 8, minHeight: 16 }}>
+          {drops.map(d => (
+            <div key={d.id} style={{ width: 10, height: 10, borderRadius: "50%", background: d.color, boxShadow: `0 0 5px ${d.color}77`, flexShrink: 0 }} />
+          ))}
           {totalCount > 0 && (
-            <div style={{ position: "absolute", top: 8, right: 10, fontSize: 9, color: C.dim }}>{doneCount}/{totalCount}</div>
+            <span style={{ fontSize: 10, color: C.dim, marginLeft: "auto" }}>{doneCount} / {totalCount}</span>
           )}
-        </button>
+        </div>
       </div>
 
-      {/* ══ TAB CONTENT ══ */}
-      <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+      {/* 구분선 */}
+      <div style={{ flexShrink: 0, height: 1, background: C.border, margin: "12px 18px 0" }} />
 
-        {/* ── PALETTE TAB ── */}
-        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: "14px 20px 90px", transition: "opacity 0.2s, transform 0.2s", opacity: homeTab==="palette"?1:0, pointerEvents: homeTab==="palette"?"auto":"none", transform: homeTab==="palette"?"translateX(0)":"translateX(-18px)" }}>
-          {/* Big palette canvas */}
-          <div style={{ flex: 1, borderRadius: radius.lg, overflow: "hidden", border: `1px solid ${C.border}`, position: "relative", minHeight: 0 }}>
-            <PaletteCanvas drops={drops} version={canvasVer} totalCount={totalCount} animDrop={animDrop} onAnimDone={() => setAnimDrop(null)} />
-            {drops.length === 0 && (
-              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, pointerEvents: "none" }}>
-                <div style={{ fontSize: 32, color: "#1c1c1c" }}>●</div>
-                <div style={{ fontSize: 12, color: "#222", letterSpacing: "0.12em" }}>할 일을 완료하면 색이 피어나요</div>
-              </div>
-            )}
+      {/* ══ TODO LIST (하단 스크롤) ══ */}
+      <div style={{ flex: 1, overflowY: "auto", padding: "12px 18px 100px" }}>
+        {cats.length === 0 && (
+          <div style={{ textAlign: "center", padding: "40px 0", color: C.dim }}>
+            <div style={{ fontSize: 11, letterSpacing: "0.1em" }}>✦ 카테고리 버튼으로 시작해보세요</div>
           </div>
-          {/* Color dots row */}
-          {drops.length > 0 && (
-            <div style={{ flexShrink: 0, marginTop: 12, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-              {drops.map(d => (
-                <div key={d.id} style={{ width: 14, height: 14, borderRadius: "50%", background: d.color, boxShadow: `0 0 7px ${d.color}88` }} />
-              ))}
-              <div style={{ flex: 1 }} />
-              <span style={{ fontSize: 10, color: C.dim }}>{doneCount}개 완료</span>
-            </div>
-          )}
-          {/* Hint to switch tab */}
-          <button onClick={() => setHomeTab("todos")} style={{ flexShrink: 0, marginTop: 10, width: "100%", padding: "11px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: radius.lg, color: C.muted, cursor: "pointer", fontSize: 12, fontFamily: "inherit", letterSpacing: "0.04em" }}>
-            할 일 보기 →
-          </button>
-        </div>
-
-        {/* ── TODOS TAB ── */}
-        <div style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "14px 20px 100px", transition: "opacity 0.2s, transform 0.2s", opacity: homeTab==="todos"?1:0, pointerEvents: homeTab==="todos"?"auto":"none", transform: homeTab==="todos"?"translateX(0)":"translateX(18px)" }}>
-          {cats.length === 0 && (
-            <div style={{ textAlign: "center", padding: "60px 0", color: C.dim }}>
-              <div style={{ fontSize: 28, marginBottom: 10, color: "#1e1e1e" }}>✦</div>
-              <div style={{ fontSize: 12, letterSpacing: "0.08em" }}>카테고리를 추가해보세요</div>
-            </div>
-          )}
-          {cats.map(cat => {
-            const todos = selTodos[cat.id] || [];
-            const catDone = todos.filter(t => t.done).length;
-            return (
-              <div key={cat.id} style={{ marginBottom: 26 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px 4px 8px", background: cat.color + "15", borderRadius: radius.full, border: `1px solid ${cat.color}28` }}>
-                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: cat.color, boxShadow: `0 0 5px ${cat.color}` }} />
-                    <span style={{ fontSize: 12, fontWeight: 600, color: cat.color }}>{cat.name}</span>
-                  </div>
-                  {todos.length > 0 && <span style={{ fontSize: 10, color: C.dim }}>{catDone}/{todos.length}</span>}
-                  <div style={{ flex: 1 }} />
-                  <button onClick={() => { setAddingTo(cat.id); setNewTodoText(""); setTimeout(() => inputRef.current?.focus(), 50); }}
-                    style={{ width: 26, height: 26, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border2}`, color: C.muted, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
+        )}
+        {cats.map(cat => {
+          const todos = selTodos[cat.id] || [];
+          const catDone = todos.filter(t => t.done).length;
+          return (
+            <div key={cat.id} style={{ marginBottom: 22 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px 4px 8px", background: cat.color + "15", borderRadius: radius.full, border: `1px solid ${cat.color}28` }}>
+                  <div style={{ width: 6, height: 6, borderRadius: "50%", background: cat.color, boxShadow: `0 0 5px ${cat.color}` }} />
+                  <span style={{ fontSize: 12, fontWeight: 600, color: cat.color }}>{cat.name}</span>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                  {todos.map(todo => (
-                    <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: todo.done ? "transparent" : C.card, borderRadius: radius.md, border: `1px solid ${todo.done ? C.border : C.border2}`, opacity: todo.done ? 0.42 : 1, transition: "all 0.25s" }}>
-                      <div onClick={() => toggleTodo(cat.id, todo.id)} style={{ width: 20, height: 20, borderRadius: "50%", flexShrink: 0, cursor: "pointer", border: `2px solid ${todo.done ? todo.color : C.border2}`, background: todo.done ? todo.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s" }}>
-                        {todo.done && <span style={{ color: "#080808", fontSize: 10, fontWeight: 800 }}>✓</span>}
-                      </div>
-                      <span style={{ flex: 1, fontSize: 13, color: todo.done ? C.muted : C.text, textDecoration: todo.done ? "line-through" : "none", transition: "all 0.2s" }}>{todo.text}</span>
-                      {todo.routineId && <span style={{ fontSize: 9, color: C.dim, background: C.surface, padding: "2px 6px", borderRadius: 4 }}>루틴</span>}
-                      {!todo.routineId && (
-                        <button onClick={() => deleteTodo(cat.id, todo.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }}>✕</button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                {addingTo === cat.id && (
-                  <div style={{ display: "flex", gap: 7, marginTop: 7 }}>
-                    <StyledInput inputRef={inputRef} value={newTodoText} onChange={e => setNewTodoText(e.target.value)}
-                      onKeyDown={e => { if (e.key==="Enter") addTodo(cat.id); if (e.key==="Escape") setAddingTo(null); }}
-                      placeholder="할 일을 입력하고 Enter" />
-                    <button onClick={() => addTodo(cat.id)} style={{ width: 42, height: 42, background: C.text, color: C.bg, border: "none", borderRadius: radius.md, cursor: "pointer", fontWeight: 700, fontSize: 18, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>↵</button>
-                  </div>
-                )}
+                {todos.length > 0 && <span style={{ fontSize: 10, color: C.dim }}>{catDone}/{todos.length}</span>}
+                <div style={{ flex: 1 }} />
+                <button onClick={() => { setAddingTo(cat.id); setNewTodoText(""); setTimeout(() => inputRef.current?.focus(), 50); }}
+                  style={{ width: 26, height: 26, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border2}`, color: C.muted, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>+</button>
               </div>
-            );
-          })}
-          {/* Palette peek button */}
-          <button onClick={() => setHomeTab("palette")} style={{ width: "100%", padding: "11px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: radius.lg, color: C.muted, cursor: "pointer", fontSize: 12, fontFamily: "inherit", letterSpacing: "0.04em" }}>
-            ← 팔레트 보기
-          </button>
-        </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                {todos.map(todo => (
+                  <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: todo.done ? "transparent" : C.card, borderRadius: radius.md, border: `1px solid ${todo.done ? C.border : C.border2}`, opacity: todo.done ? 0.42 : 1, transition: "all 0.25s" }}>
+                    <div onClick={() => toggleTodo(cat.id, todo.id)} style={{ width: 20, height: 20, borderRadius: "50%", flexShrink: 0, cursor: "pointer", border: `2px solid ${todo.done ? todo.color : C.border2}`, background: todo.done ? todo.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s" }}>
+                      {todo.done && <span style={{ color: "#080808", fontSize: 10, fontWeight: 800 }}>✓</span>}
+                    </div>
+                    <span style={{ flex: 1, fontSize: 13, color: todo.done ? C.muted : C.text, textDecoration: todo.done ? "line-through" : "none", transition: "all 0.2s" }}>{todo.text}</span>
+                    {todo.routineId && <span style={{ fontSize: 9, color: C.dim, background: C.surface, padding: "2px 6px", borderRadius: 4 }}>루틴</span>}
+                    {!todo.routineId && (
+                      <button onClick={() => deleteTodo(cat.id, todo.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }}>✕</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {addingTo === cat.id && (
+                <div style={{ display: "flex", gap: 7, marginTop: 7 }}>
+                  <StyledInput inputRef={inputRef} value={newTodoText} onChange={e => setNewTodoText(e.target.value)}
+                    onKeyDown={e => { if (e.key==="Enter") addTodo(cat.id); if (e.key==="Escape") setAddingTo(null); }}
+                    placeholder="할 일을 입력하고 Enter" />
+                  <button onClick={() => addTodo(cat.id)} style={{ width: 42, height: 42, background: C.text, color: C.bg, border: "none", borderRadius: radius.md, cursor: "pointer", fontWeight: 700, fontSize: 18, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>↵</button>
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {showCatMgr && (
