@@ -188,8 +188,19 @@ function PaletteCanvas({ drops, version, totalCount, animDrop, onAnimDone }) {
 // Date helpers
 // ─────────────────────────────────────────────
 const dateKey = (d) => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-const today = new Date();
-const todayKey = dateKey(today);
+const getTodayKey = () => dateKey(new Date());
+
+// ─────────────────────────────────────────────
+// localStorage persistence
+// ─────────────────────────────────────────────
+const LS = {
+  get: (key, fallback) => {
+    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
+  },
+  set: (key, val) => {
+    try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
+  },
+};
 
 // ─────────────────────────────────────────────
 // Initial data
@@ -197,15 +208,37 @@ const todayKey = dateKey(today);
 let _uid = 200;
 const uid = () => ++_uid;
 
-const INIT_CATEGORIES = [
+const DEFAULT_CATEGORIES = [
   { id: 1, name: "공부", color: "#6c8fff" },
   { id: 2, name: "운동", color: "#ff7c6e" },
 ];
-const INIT_ROUTINES = [
-  { id: 1, catId: 1, name: "영단어 30개", days: [1,2,3,4,5], dates: [] },
-  { id: 2, catId: 2, name: "스쿼트 100개", days: [1,3,5], dates: [] },
-];
+const DEFAULT_ROUTINES = [];
 function mockHistory() { return {}; }
+
+// ─── Onboarding ───
+function OnboardingOverlay({ onDone }) {
+  const [step, setStep] = useState(0);
+  const steps = [
+    { icon: "🎨", title: "MakeBlack", desc: "할 일을 완료할 때마다\n물감이 팔레트에 퍼져나가요" },
+    { icon: "✦",  title: "색이 섞여요", desc: "여러 할 일을 완료할수록\n색이 혼합되어 검정으로 가까워져요" },
+    { icon: "●",  title: "BLACK 달성", desc: "모든 할 일을 완료하면\n팔레트가 BLACK이 돼요" },
+  ];
+  const s = steps[step];
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 400, background: "#080808", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 32 }}>
+      <div style={{ fontSize: 56, marginBottom: 24 }}>{s.icon}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: "#f0ece6", marginBottom: 12, letterSpacing: "-0.02em" }}>{s.title}</div>
+      <div style={{ fontSize: 14, color: "#4a4a4a", textAlign: "center", lineHeight: 1.8, whiteSpace: "pre-line", marginBottom: 48 }}>{s.desc}</div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 32 }}>
+        {steps.map((_, i) => <div key={i} style={{ width: i === step ? 20 : 6, height: 6, borderRadius: 3, background: i === step ? "#f0ece6" : "#252525", transition: "all 0.3s" }} />)}
+      </div>
+      {step < steps.length - 1
+        ? <button onClick={() => setStep(s => s + 1)} style={{ padding: "13px 40px", background: "#f0ece6", color: "#080808", border: "none", borderRadius: 999, cursor: "pointer", fontSize: 14, fontWeight: 700, fontFamily: "inherit" }}>다음</button>
+        : <button onClick={onDone} style={{ padding: "13px 40px", background: "#f0ece6", color: "#080808", border: "none", borderRadius: 999, cursor: "pointer", fontSize: 14, fontWeight: 700, fontFamily: "inherit" }}>시작하기</button>
+      }
+    </div>
+  );
+}
 
 
 // ─────────────────────────────────────────────
@@ -213,14 +246,14 @@ function mockHistory() { return {}; }
 // ─────────────────────────────────────────────
 const C = {
   bg:      "#0a0a0a",
-  surface: "#131313",
-  card:    "#161616",
-  border:  "#1f1f1f",
-  border2: "#252525",
+  surface: "#141414",
+  card:    "#181818",
+  border:  "#242424",
+  border2: "#2e2e2e",
   text:    "#f0ece6",
-  muted:   "#4a4a4a",
-  dim:     "#2a2a2a",
-  pill:    "#1c1c1c",
+  muted:   "#888888",   // was #4a4a4a — lifted for WCAG AA
+  dim:     "#555555",   // was #2a2a2a — lifted for readability
+  pill:    "#1e1e1e",
 };
 const radius = { sm: 10, md: 16, lg: 22, full: 999 };
 
@@ -421,12 +454,21 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
 // Home Screen
 // ─────────────────────────────────────────────
 function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory }) {
+  // Dynamic today — refreshes at midnight
+  const [todayKey, setTodayKey]         = useState(getTodayKey);
+  useEffect(() => {
+    const tick = () => { const nk = getTodayKey(); if (nk !== todayKey) setTodayKey(nk); };
+    const id = setInterval(tick, 60000);
+    return () => clearInterval(id);
+  }, [todayKey]);
+
   const [showCatMgr,   setShowCatMgr]   = useState(false);
-  const [cats, setCats]   = useState(categories);
-  const [ruts, setRuts]   = useState(routines);
-  const [selectedDate, setSelectedDate] = useState(todayKey);
-  const [viewMonth, setViewMonth]       = useState({ y: today.getFullYear(), m: today.getMonth() });
-  const [todosByDate, setTodosByDate]   = useState({});
+  const [cats, setCats]   = useState(() => LS.get("mb_cats", categories));
+  const [ruts, setRuts]   = useState(() => LS.get("mb_ruts", routines));
+  const [selectedDate, setSelectedDate] = useState(getTodayKey);
+  const [viewMonth, setViewMonth]       = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const [todosByDate, setTodosByDate]   = useState(() => LS.get("mb_todos", {}));
+  const [toast, setToast]               = useState(null); // { msg, undoFn }
   const [addingTo, setAddingTo]         = useState(null);
   const [newTodoText, setNewTodoText]   = useState("");
   const [animDrop, setAnimDrop]         = useState(null);
@@ -464,6 +506,10 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
 
   useEffect(() => { if (isBlack && !blackDone) setBlackDone(true); }, [isBlack]);
   useEffect(() => { setBlackDone(false); setCanvasVer(v => v + 1); }, [selectedDate]);
+  useEffect(() => { LS.set("mb_cats", cats); }, [cats]);
+  useEffect(() => { LS.set("mb_ruts", ruts); }, [ruts]);
+  useEffect(() => { LS.set("mb_todos", todosByDate); }, [todosByDate]);
+  useEffect(() => { LS.set("mb_palette", paletteHistory); }, [paletteHistory]);
 
   const toggleTodo = (catId, todoId) => {
     const dk = selectedDate;
@@ -484,6 +530,13 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
         const seed = uid() * 17;
         const drop = { id: todoId, hue, rgb, color, px: 0.12 + Math.random() * 0.76, py: 0.12 + Math.random() * 0.76, seed };
         setAnimDrop(drop); setCanvasVer(v => v + 1);
+        // Undo toast
+        const snapshot = { todoState: { ...prev }, paletteState: prev };
+        setToast({ msg: `"${todo.text}" 완료!`, undoFn: () => {
+          setTodosByDate(s => { const b = s[dk]||{}; const mapped2 = (selTodos[catId]||[]).map(t => t.id===todoId?{...t,done:false}:t); return {...s,[dk]:{...b,[catId]:mapped2}}; });
+          setPaletteHistory(p => { const e2 = p[dk]||{drops:[]}; return {...p,[dk]:{...e2,drops:e2.drops.filter(d=>d.id!==todoId)}}; });
+          setCanvasVer(v => v + 1);
+        }});
         return { ...prev, [dk]: { drops: [...entry.drops, drop], total: totalCount } };
       } else {
         setCanvasVer(v => v + 1); setBlackDone(false);
@@ -527,11 +580,27 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
     const d = new Date(y, m + delta, 1);
     return { y: d.getFullYear(), m: d.getMonth() };
   });
+  const goDay = (delta) => {
+    const d = new Date(selectedDate + "T00:00:00");
+    d.setDate(d.getDate() + delta);
+    const dk = dateKey(d);
+    setSelectedDate(dk);
+    setViewMonth({ y: d.getFullYear(), m: d.getMonth() });
+  };
 
   const mixedRgb = mixRgbList(drops.map(d => d.rgb), totalCount);
   const mixedHsl = mixedRgb ? rgbToHsl(...mixedRgb) : null;
   const mixedCss = mixedHsl ? `hsl(${mixedHsl[0]|0},${mixedHsl[1]|0}%,${mixedHsl[2]|0}%)` : null;
   const isToday  = selectedDate === todayKey;
+
+  // Gradient progress bar: left=first drop color, right=mixed color, darkens toward black
+  const progressGradient = (() => {
+    if (drops.length === 0) return C.border;
+    if (drops.length === 1) return drops[0].color;
+    const first = `hsl(${drops[0].hue},82%,54%)`;
+    const last  = mixedCss || first;
+    return `linear-gradient(90deg, ${first}, ${last})`;
+  })();
 
   return (
     <div style={{ height: "100dvh", background: C.bg, color: C.text, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -602,12 +671,17 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
       <div style={{ flexShrink: 0, padding: "14px 18px 0" }}>
         {/* 헤더 */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          <div style={{ background: "none", border: "none", padding: 0, textAlign: "left" }}>
-            <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase" }}>makeblack</div>
-            <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em", color: C.text, marginTop: 1 }}>
-              {isToday ? "오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" })}
-              <span style={{ fontSize: 11, color: C.dim, marginLeft: 6, fontWeight: 400 }}>{calYear}.{String(calMonth+1).padStart(2,"0")} ›</span>
+          {/* 날짜 + 이전/다음 화살표 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <button onClick={() => goDay(-1)} style={{ width: 26, height: 26, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>‹</button>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase" }}>makeblack</div>
+              <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em", color: C.text, marginTop: 1, whiteSpace: "nowrap" }}>
+                {isToday ? "오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" })}
+                <span style={{ fontSize: 10, color: C.dim, marginLeft: 5, fontWeight: 400 }}>{calYear}.{String(calMonth+1).padStart(2,"0")}</span>
+              </div>
             </div>
+            <button onClick={() => goDay(1)} style={{ width: 26, height: 26, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>›</button>
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             {/* 진행률 pill */}
@@ -629,14 +703,28 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
           )}
         </div>
 
-        {/* 색 도트 + 완료 카운트 */}
-        <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 8, minHeight: 16 }}>
-          {drops.map(d => (
-            <div key={d.id} style={{ width: 10, height: 10, borderRadius: "50%", background: d.color, boxShadow: `0 0 5px ${d.color}77`, flexShrink: 0 }} />
-          ))}
-          {totalCount > 0 && (
-            <span style={{ fontSize: 10, color: C.dim, marginLeft: "auto" }}>{doneCount} / {totalCount}</span>
-          )}
+        {/* 그라데이션 프로그레스바 */}
+        <div style={{ margin: "10px auto 0", width: "min(52vw, 200px)" }}>
+          <div style={{ height: 4, borderRadius: 4, background: C.surface, overflow: "hidden" }}>
+            <div style={{
+              height: "100%", borderRadius: 4,
+              width: `${progress}%`,
+              background: isBlack
+                ? "linear-gradient(90deg, #333, #111)"
+                : drops.length > 0 ? progressGradient : C.border,
+              transition: "width 0.8s ease, background 1s ease",
+              boxShadow: drops.length > 0 && !isBlack ? `0 0 6px ${mixedCss || "transparent"}88` : "none",
+            }} />
+          </div>
+          {/* 색 도트 + 완료 카운트 */}
+          <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 6, minHeight: 14 }}>
+            {drops.map(d => (
+              <div key={d.id} style={{ width: 8, height: 8, borderRadius: "50%", background: d.color, boxShadow: `0 0 4px ${d.color}66`, flexShrink: 0 }} />
+            ))}
+            {totalCount > 0 && (
+              <span style={{ fontSize: 10, color: C.dim, marginLeft: "auto" }}>{doneCount} / {totalCount}</span>
+            )}
+          </div>
         </div>
       </div>
 
@@ -645,9 +733,20 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
 
       {/* ══ TODO LIST (하단 스크롤) ══ */}
       <div style={{ flex: 1, overflowY: "auto", padding: "12px 18px 100px" }}>
+        {/* Toast */}
+        {toast && (
+          <div style={{ position: "fixed", bottom: 82, left: "50%", transform: "translateX(-50%)", zIndex: 250, background: "#1e1e1e", border: "1px solid #2a2a2a", borderRadius: radius.full, padding: "10px 16px", display: "flex", alignItems: "center", gap: 12, boxShadow: "0 4px 24px rgba(0,0,0,0.6)", animation: "fadeIn 0.2s ease", whiteSpace: "nowrap" }}>
+            <span style={{ fontSize: 12, color: "#d0ccc6" }}>{toast.msg}</span>
+            <button onClick={() => { toast.undoFn(); setToast(null); }} style={{ fontSize: 11, color: "#6c8fff", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>실행 취소</button>
+          </div>
+        )}
+
         {cats.length === 0 && (
-          <div style={{ textAlign: "center", padding: "40px 0", color: C.dim }}>
-            <div style={{ fontSize: 11, letterSpacing: "0.1em" }}>✦ 카테고리 버튼으로 시작해보세요</div>
+          <div style={{ textAlign: "center", padding: "48px 24px", color: C.dim }}>
+            <div style={{ fontSize: 36, marginBottom: 14 }}>🎨</div>
+            <div style={{ fontSize: 14, color: "#555", marginBottom: 8, fontWeight: 600 }}>아직 카테고리가 없어요</div>
+            <div style={{ fontSize: 12, color: C.dim, lineHeight: 1.8, marginBottom: 20 }}>상단 오른쪽 카테고리 버튼을 눌러서<br/>첫 번째 카테고리를 만들어보세요</div>
+            <button onClick={() => setShowCatMgr(true)} style={{ padding: "11px 28px", background: "#f0ece6", color: "#080808", border: "none", borderRadius: radius.full, cursor: "pointer", fontSize: 13, fontWeight: 700, fontFamily: "inherit" }}>카테고리 만들기</button>
           </div>
         )}
         {cats.map(cat => {
@@ -754,13 +853,15 @@ function BottomNav({ tab, setTab }) {
 // ─────────────────────────────────────────────
 export default function MakeBlack() {
   const [tab, setTab]                       = useState("home");
-  const [categories]                        = useState(INIT_CATEGORIES);
-  const [routines]                          = useState(INIT_ROUTINES);
-  const [paletteHistory, setPaletteHistory] = useState(mockHistory);
+  const [showOnboarding, setShowOnboarding] = useState(() => !LS.get("mb_onboarded", false));
+  const [categories]                        = useState(() => LS.get("mb_cats", DEFAULT_CATEGORIES));
+  const [routines]                          = useState(() => LS.get("mb_ruts", DEFAULT_ROUTINES));
+  const [paletteHistory, setPaletteHistory] = useState(() => LS.get("mb_palette", {}));
 
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", position: "relative", minHeight: "100vh", background: C.bg }}>
-      {tab === "home"    && <HomeScreen categories={categories} routines={routines} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} />}
+      {showOnboarding && <OnboardingOverlay onDone={() => { LS.set("mb_onboarded", true); setShowOnboarding(false); }} />}
+      {!showOnboarding && tab === "home"    && <HomeScreen categories={categories} routines={routines} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} />}
       {tab === "search"  && <PlaceholderScreen label="검색" icon="◎" />}
       {tab === "friends" && <PlaceholderScreen label="친구" icon="◈" />}
       {tab === "mypage"  && <PlaceholderScreen label="마이페이지" icon="◉" />}
