@@ -257,17 +257,22 @@ function OnboardingOverlay({ onDone }) {
 // ─────────────────────────────────────────────
 // Design tokens
 // ─────────────────────────────────────────────
-const C = {
-  bg:      "#0a0a0a",
-  surface: "#141414",
-  card:    "#181818",
-  border:  "#242424",
-  border2: "#2e2e2e",
-  text:    "#f0ece6",
-  muted:   "#888888",   // was #4a4a4a — lifted for WCAG AA
-  dim:     "#555555",   // was #2a2a2a — lifted for readability
-  pill:    "#1e1e1e",
+const THEMES = {
+  dark: {
+    bg: "#0a0a0a", surface: "#141414", card: "#181818",
+    border: "#242424", border2: "#2e2e2e",
+    text: "#f0ece6", muted: "#888888", dim: "#555555", pill: "#1e1e1e",
+    paletteBase: "#0d0c0b",
+  },
+  light: {
+    bg: "#f5f4f0", surface: "#ffffff", card: "#f0eeea",
+    border: "#e0ddd8", border2: "#d4d0cb",
+    text: "#1a1a1a", muted: "#777777", dim: "#aaaaaa", pill: "#e8e5e0",
+    paletteBase: "#f0eeea",
+  },
 };
+// C는 App root에서 주입되는 전역 ref — 초기값은 dark
+let C = THEMES.dark;
 const radius = { sm: 10, md: 16, lg: 22, full: 999 };
 
 // ─────────────────────────────────────────────
@@ -636,7 +641,7 @@ function FlyingOrb({ sx, sy, tx, ty, drops, totalCount }) {
 // ─────────────────────────────────────────────
 // Home Screen
 // ─────────────────────────────────────────────
-function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHistory, todosByDate, setTodosByDate, selectedDate, setSelectedDate }) {
+function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHistory, todosByDate, setTodosByDate, selectedDate, setSelectedDate, settings }) {
   // Dynamic today — refreshes at midnight
   const [todayKey, setTodayKey]         = useState(getTodayKey);
   useEffect(() => {
@@ -734,6 +739,7 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
 
   useEffect(() => {
     if (isBlack && blackPhase === null) {
+      if (!settings.blackAnimationOn) return; // 애니메이션 off 시 스킵
       setBlackPhase("in");
       clearTimeout(blackTimer.current);
       blackTimer.current = setTimeout(() => {
@@ -843,7 +849,8 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
   const calYear     = viewMonth.y;
   const calMonth    = viewMonth.m;
   const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
-  const firstDow    = new Date(calYear, calMonth, 1).getDay();
+  const _rawDow1 = new Date(calYear, calMonth, 1).getDay(); // 0=Sun
+  const firstDow = settings.calStartSunday ? _rawDow1 : (_rawDow1 === 0 ? 6 : _rawDow1 - 1);
   const monthName   = new Date(calYear, calMonth, 1).toLocaleString("ko-KR", { month: "long" });
   const goMonth     = (delta) => setViewMonth(({ y, m }) => {
     const d = new Date(y, m + delta, 1);
@@ -903,7 +910,7 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
   })();
 
   return (
-    <div style={{ height: "100dvh", background: C.bg, color: C.text, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+    <div style={{ height: "100vh", background: C.bg, color: C.text, fontFamily: "system-ui,sans-serif", display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
       {/* ── BLACK overlay ── */}
       {blackPhase && (
@@ -1049,13 +1056,14 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
         </div>
 
         {/* 팔레트 캔버스 */}
-        <div ref={paletteAreaRef} style={{ width: "min(52vw, 200px)", aspectRatio: "1", borderRadius: radius.lg, overflow: "hidden", border: `1px solid ${C.border}`, position: "relative", margin: "0 auto" }}>
+        {/* 팔레트 크기: small=140, medium=200, large=260 */}
+        <div ref={paletteAreaRef} style={{ width: settings.paletteSize === "small" ? "min(38vw,140px)" : settings.paletteSize === "large" ? "min(66vw,260px)" : "min(52vw,200px)", aspectRatio: "1", borderRadius: radius.lg, overflow: "hidden", border: `1px solid ${C.border}`, position: "relative", margin: "0 auto" }}>
           <PaletteCanvas drops={drops} version={canvasVer} totalCount={totalCount} animDrop={animDrop} onAnimDone={() => setAnimDrop(null)} />
 
         </div>
 
         {/* 그라데이션 프로그레스바 */}
-        <div style={{ margin: "10px auto 0", width: "min(52vw, 200px)" }}>
+        <div style={{ margin: "10px auto 0", width: settings.paletteSize === "small" ? "min(38vw,140px)" : settings.paletteSize === "large" ? "min(66vw,260px)" : "min(52vw,200px)" }}>
           <div style={{ height: 4, borderRadius: 4, background: C.surface, overflow: "hidden" }}>
             <div style={{
               height: "100%", borderRadius: 4,
@@ -1169,16 +1177,249 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
 }
 
 // ─────────────────────────────────────────────
-// MyPage — 통계 화면
+// MyPage
 // ─────────────────────────────────────────────
-function MyPageScreen({ paletteHistory, todosByDate, cats, ruts }) {
+function SettingRow({ label, sub, children }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 0", borderBottom: `1px solid ${C.border}` }}>
+      <div>
+        <div style={{ fontSize: 13, color: C.text }}>{label}</div>
+        {sub && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{sub}</div>}
+      </div>
+      <div style={{ flexShrink: 0, marginLeft: 16 }}>{children}</div>
+    </div>
+  );
+}
+
+function Toggle({ on, onChange }) {
+  return (
+    <div onClick={() => onChange(!on)} style={{ width: 42, height: 24, borderRadius: 12, background: on ? "#6c8fff" : C.surface, border: `1px solid ${on ? "#6c8fff" : C.border2}`, position: "relative", cursor: "pointer", transition: "all 0.2s", flexShrink: 0 }}>
+      <div style={{ position: "absolute", top: 2, left: on ? 20 : 2, width: 18, height: 18, borderRadius: "50%", background: on ? "#fff" : C.muted, transition: "left 0.2s", boxShadow: "0 1px 4px rgba(0,0,0,0.3)" }} />
+    </div>
+  );
+}
+
+function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
+  const [section, setSection] = useState(null); // null | "account" | "privacy" | "app" | "palette" | "pin" | "notification"
+  const [pinInput, setPinInput] = useState("");
+  const [pinConfirm, setPinConfirm] = useState("");
+  const [pinStep, setPinStep] = useState(1);
+  const [editField, setEditField] = useState(null); // { key, value }
+
+  const S_BORDER = { borderBottom: `1px solid ${C.border}` };
+  const chevron = <span style={{ color: C.dim, fontSize: 12 }}>›</span>;
+
+  const sections = [
+    { key: "account",      icon: "◎", label: "계정 관리",       sub: user.email },
+    { key: "privacy",      icon: "◈", label: "공개 범위",        sub: settings.privacy === "public" ? "전체 공개" : settings.privacy === "followers" ? "팔로워만" : "비공개" },
+    { key: "notification", icon: "◉", label: "알림 설정",        sub: settings.reminderOn ? `매일 ${settings.reminderTime}` : "꺼짐" },
+    { key: "app",          icon: "⌘", label: "앱 설정",          sub: "캘린더 · 시간 · 언어" },
+    { key: "palette",      icon: "✦", label: "팔레트 설정",      sub: "애니메이션 · 크기" },
+    { key: "pin",          icon: "◆", label: "앱 잠금 (PIN)",    sub: settings.pinLock ? "설정됨" : "꺼짐" },
+    { key: "info",         icon: "◌", label: "버전 정보 / 피드백", sub: "v0.1.0-beta" },
+  ];
+
+  const back = () => setSection(null);
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 250, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "flex-end" }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: "100%", background: "#111", borderRadius: "26px 26px 0 0", maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ width: 34, height: 4, borderRadius: 2, background: "#252525", margin: "14px auto 0" }} />
+
+        {/* 헤더 */}
+        <div style={{ display: "flex", alignItems: "center", padding: "14px 20px 10px", gap: 10 }}>
+          {section && <button onClick={back} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 20, padding: 0, lineHeight: 1, marginRight: 4 }}>‹</button>}
+          <span style={{ fontSize: 16, fontWeight: 700, color: C.text, flex: 1 }}>
+            {section ? sections.find(s => s.key === section)?.label : "설정"}
+          </span>
+          <button onClick={onClose} style={{ width: 28, height: 28, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, fontSize: 14, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>✕</button>
+        </div>
+
+        <div style={{ padding: "4px 20px 48px" }}>
+          {/* 메인 메뉴 */}
+          {!section && sections.map(s => (
+            <div key={s.key} onClick={() => setSection(s.key)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer" }}>
+              <div style={{ width: 34, height: 34, borderRadius: radius.sm, background: C.surface, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, color: C.muted, flexShrink: 0 }}>{s.icon}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: C.text }}>{s.label}</div>
+                {s.sub && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{s.sub}</div>}
+              </div>
+              {chevron}
+            </div>
+          ))}
+
+          {/* 계정 관리 */}
+          {section === "account" && (<>
+            {[
+              { key: "name", label: "이름", val: user.name },
+              { key: "handle", label: "핸들", val: user.handle },
+              { key: "email", label: "이메일", val: user.email },
+              { key: "bio", label: "소개", val: user.bio },
+            ].map(f => (
+              <div key={f.key} style={{ padding: "14px 0", borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ fontSize: 10, color: C.muted, marginBottom: 6, letterSpacing: "0.06em" }}>{f.label}</div>
+                {editField?.key === f.key
+                  ? <div style={{ display: "flex", gap: 8 }}>
+                      <input value={editField.value} onChange={e => setEditField(ef => ({ ...ef, value: e.target.value }))}
+                        autoFocus style={{ flex: 1, background: C.card, border: `1px solid ${C.border2}`, borderRadius: radius.sm, padding: "8px 10px", color: C.text, fontSize: 13, outline: "none", fontFamily: "inherit" }} />
+                      <button onClick={() => { setUser(u => ({ ...u, [f.key]: editField.value })); setEditField(null); }} style={{ padding: "8px 14px", background: C.text, color: C.bg, border: "none", borderRadius: radius.sm, cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>저장</button>
+                    </div>
+                  : <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 14, color: C.text }}>{f.val}</span>
+                      <button onClick={() => setEditField({ key: f.key, value: f.val })} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>변경</button>
+                    </div>
+                }
+              </div>
+            ))}
+            <div style={{ marginTop: 24 }}>
+              <button style={{ width: "100%", padding: "12px", background: "transparent", border: `1px solid #3a1a1a`, borderRadius: radius.md, color: "#ff7070", cursor: "pointer", fontSize: 13, fontFamily: "inherit" }}>계정 삭제</button>
+            </div>
+          </>)}
+
+          {/* 공개 범위 */}
+          {section === "privacy" && (<>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 14, lineHeight: 1.7 }}>내 할 일과 팔레트를 누가 볼 수 있는지 설정해요</div>
+            {[
+              { val: "public",    label: "전체 공개",  sub: "모든 사람이 볼 수 있어요" },
+              { val: "followers", label: "팔로워만",   sub: "팔로워만 볼 수 있어요" },
+              { val: "private",   label: "비공개",     sub: "나만 볼 수 있어요" },
+            ].map(opt => (
+              <div key={opt.val} onClick={() => updSetting("privacy", opt.val)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer" }}>
+                <div style={{ width: 20, height: 20, borderRadius: "50%", border: `2px solid ${settings.privacy === opt.val ? "#6c8fff" : C.border2}`, background: settings.privacy === opt.val ? "#6c8fff" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                  {settings.privacy === opt.val && <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#fff" }} />}
+                </div>
+                <div>
+                  <div style={{ fontSize: 13, color: C.text }}>{opt.label}</div>
+                  <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{opt.sub}</div>
+                </div>
+              </div>
+            ))}
+          </>)}
+
+          {/* 알림 설정 */}
+          {section === "notification" && (<>
+            <SettingRow label="매일 리마인더" sub="설정한 시간에 알림을 보내요">
+              <Toggle on={settings.reminderOn} onChange={v => updSetting("reminderOn", v)} />
+            </SettingRow>
+            {settings.reminderOn && (
+              <div style={{ padding: "14px 0", borderBottom: `1px solid ${C.border}` }}>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>리마인더 시간</div>
+                <input type="time" value={settings.reminderTime} onChange={e => updSetting("reminderTime", e.target.value)}
+                  style={{ background: C.card, border: `1px solid ${C.border2}`, borderRadius: radius.sm, padding: "9px 12px", color: C.text, fontSize: 14, outline: "none", fontFamily: "inherit", colorScheme: "dark" }} />
+              </div>
+            )}
+          </>)}
+
+          {/* 앱 설정 */}
+          {section === "app" && (<>
+            <SettingRow label="테마">
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["dark","🌙 다크"],["light","☀️ 라이트"]].map(([k,l]) => (
+                  <button key={k} onClick={() => updSetting("theme", k)} style={{ padding: "6px 12px", borderRadius: radius.full, background: settings.theme === k ? C.text : C.card, color: settings.theme === k ? C.bg : C.muted, border: `1px solid ${settings.theme === k ? C.text : C.border2}`, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>{l}</button>
+                ))}
+              </div>
+            </SettingRow>
+            <SettingRow label="캘린더 시작 요일" sub="일요일부터 시작">
+              <Toggle on={settings.calStartSunday} onChange={v => updSetting("calStartSunday", v)} />
+            </SettingRow>
+            <SettingRow label="24시간 표기" sub="오후 2시 → 14:00">
+              <Toggle on={settings.use24h} onChange={v => updSetting("use24h", v)} />
+            </SettingRow>
+            <SettingRow label="언어" sub="Language">
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["ko","한국어"],["en","English"]].map(([k,l]) => (
+                  <button key={k} onClick={() => updSetting("language", k)} style={{ padding: "6px 12px", borderRadius: radius.full, background: settings.language === k ? C.text : C.card, color: settings.language === k ? C.bg : C.muted, border: `1px solid ${settings.language === k ? C.text : C.border2}`, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>{l}</button>
+                ))}
+              </div>
+            </SettingRow>
+          </>)}
+
+          {/* 팔레트 설정 */}
+          {section === "palette" && (<>
+            <SettingRow label="BLACK 달성 애니메이션" sub="완료 시 연출 효과">
+              <Toggle on={settings.blackAnimationOn} onChange={v => updSetting("blackAnimationOn", v)} />
+            </SettingRow>
+            <SettingRow label="팔레트 크기">
+              <div style={{ display: "flex", gap: 6 }}>
+                {[["small","소"],["medium","중"],["large","대"]].map(([k,l]) => (
+                  <button key={k} onClick={() => updSetting("paletteSize", k)} style={{ width: 36, height: 30, borderRadius: radius.sm, background: settings.paletteSize === k ? C.text : C.card, color: settings.paletteSize === k ? C.bg : C.muted, border: `1px solid ${settings.paletteSize === k ? C.text : C.border2}`, cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>{l}</button>
+                ))}
+              </div>
+            </SettingRow>
+          </>)}
+
+          {/* PIN 잠금 */}
+          {section === "pin" && (<>
+            <SettingRow label="앱 잠금" sub="앱 시작 시 PIN 입력">
+              <Toggle on={settings.pinLock} onChange={v => { updSetting("pinLock", v); if (!v) { updSetting("pin", ""); setPinStep(1); setPinInput(""); setPinConfirm(""); } }} />
+            </SettingRow>
+            {settings.pinLock && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>{pinStep === 1 ? "새 PIN 4자리 입력" : "PIN 확인 (다시 입력)"}</div>
+                <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+                  {Array.from({ length: 4 }, (_, i) => (
+                    <div key={i} style={{ width: 42, height: 52, borderRadius: radius.sm, background: C.card, border: `1px solid ${(pinStep === 1 ? pinInput : pinConfirm).length > i ? "#6c8fff" : C.border2}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, color: C.text }}>
+                      {(pinStep === 1 ? pinInput : pinConfirm).length > i ? "●" : ""}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+                  {["1","2","3","4","5","6","7","8","9","","0","⌫"].map((k, i) => (
+                    <button key={i} onClick={() => {
+                      if (!k) return;
+                      const setter = pinStep === 1 ? setPinInput : setPinConfirm;
+                      const val    = pinStep === 1 ? pinInput : pinConfirm;
+                      if (k === "⌫") { setter(val.slice(0, -1)); return; }
+                      const next = val + k;
+                      setter(next);
+                      if (next.length === 4) {
+                        if (pinStep === 1) { setPinStep(2); }
+                        else if (next === pinInput) { updSetting("pin", pinInput); alert("PIN이 설정됐어요"); setPinStep(1); setPinInput(""); setPinConfirm(""); }
+                        else { alert("PIN이 일치하지 않아요"); setPinStep(1); setPinInput(""); setPinConfirm(""); }
+                      }
+                    }} style={{ height: 48, borderRadius: radius.md, background: k ? C.card : "transparent", border: k ? `1px solid ${C.border}` : "none", color: C.text, fontSize: 18, cursor: k ? "pointer" : "default", fontFamily: "inherit" }}>{k}</button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>)}
+
+          {/* 버전 / 피드백 */}
+          {section === "info" && (<>
+            <div style={{ textAlign: "center", padding: "28px 0 20px" }}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>●</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: C.text, letterSpacing: "0.1em" }}>MakeBlack</div>
+              <div style={{ fontSize: 12, color: C.muted, marginTop: 4 }}>v0.1.0-beta</div>
+            </div>
+            {[
+              { label: "버그 신고",      sub: "불편한 점을 알려주세요" },
+              { label: "기능 제안",      sub: "원하는 기능을 제안해 주세요" },
+              { label: "앱 평가하기",    sub: "앱스토어에서 리뷰 남기기" },
+              { label: "개인정보 처리방침" },
+              { label: "서비스 이용약관" },
+            ].map(item => (
+              <div key={item.label} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer" }}>
+                <div>
+                  <div style={{ fontSize: 13, color: C.text }}>{item.label}</div>
+                  {item.sub && <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{item.sub}</div>}
+                </div>
+                {chevron}
+              </div>
+            ))}
+          </>)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MyPageScreen({ paletteHistory, todosByDate, cats, ruts, user, setUser, settings, updSetting }) {
+  const [showSettings, setShowSettings] = useState(false);
   const now   = new Date();
   const year  = now.getFullYear();
   const month = now.getMonth();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
 
-  // 이번 달 데이터 집계
-  // 루틴 포함 할일 계산
   const getMyPageTodos = (dk) => {
     const base = todosByDate[dk] || {};
     const result = {};
@@ -1213,120 +1454,138 @@ function MyPageScreen({ paletteHistory, todosByDate, cats, ruts }) {
     return { dk, day: i+1, prog, done, total, drops: hist?.drops || [], isBlack: prog >= 1 && total > 0 };
   });
 
-  const activeDays   = monthStats.filter(d => d.total > 0);
-  const blackDays    = monthStats.filter(d => d.isBlack);
-  const avgProgress  = activeDays.length > 0 ? Math.round(activeDays.reduce((s, d) => s + d.prog, 0) / activeDays.length * 100) : 0;
-  const totalDone    = monthStats.reduce((s, d) => s + d.done, 0);
-  const streak       = (() => {
-    let s = 0;
-    for (let i = now.getDate() - 1; i >= 0; i--) {
-      if (monthStats[i]?.isBlack) s++; else break;
-    }
-    return s;
-  })();
-
-  // 요일별 완료율
-  const byDow = Array.from({ length: 7 }, (_, dow) => {
-    const days = monthStats.filter(d => new Date(d.dk + "T00:00:00").getDay() === dow && d.total > 0);
-    const avg  = days.length > 0 ? days.reduce((s, d) => s + d.prog, 0) / days.length : 0;
-    return { dow, avg, count: days.length };
-  });
-  const DOW_KR = ["일","월","화","수","목","금","토"];
-
-  const monthName = now.toLocaleString("ko-KR", { month: "long" });
+  const activeDays  = monthStats.filter(d => d.total > 0);
+  const blackDays   = monthStats.filter(d => d.isBlack);
+  const avgProgress = activeDays.length > 0 ? Math.round(activeDays.reduce((s, d) => s + d.prog, 0) / activeDays.length * 100) : 0;
+  const totalDone   = monthStats.reduce((s, d) => s + d.done, 0);
+  const streak      = (() => { let s = 0; for (let i = now.getDate()-1; i>=0; i--) { if (monthStats[i]?.isBlack) s++; else break; } return s; })();
+  const byDow       = Array.from({ length: 7 }, (_, dow) => { const days = monthStats.filter(d => new Date(d.dk+"T00:00:00").getDay()===dow && d.total>0); return { dow, avg: days.length>0 ? days.reduce((s,d)=>s+d.prog,0)/days.length : 0, count: days.length }; });
+  const DOW_KR      = ["일","월","화","수","목","금","토"];
+  const monthName   = now.toLocaleString("ko-KR", { month: "long" });
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", padding: "28px 20px 100px" }}>
-      {/* 헤더 */}
-      <div style={{ marginBottom: 28 }}>
-        <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase", marginBottom: 4 }}>makeblack</div>
-        <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.03em" }}>{year}년 {monthName}</div>
-      </div>
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "system-ui,sans-serif", paddingBottom: 100 }}>
 
-      {/* 핵심 수치 4개 */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 24 }}>
-        {[
-          { label: "완료한 할 일", value: totalDone, unit: "개" },
-          { label: "활동한 날",   value: activeDays.length, unit: "일" },
-          { label: "BLACK 달성",  value: blackDays.length, unit: "일" },
-          { label: "연속 달성",   value: streak, unit: "일 연속" },
-        ].map(({ label, value, unit }) => (
-          <div key={label} style={{ background: C.surface, borderRadius: radius.lg, padding: "16px 18px", border: `1px solid ${C.border}` }}>
-            <div style={{ fontSize: 10, color: C.muted, marginBottom: 8, letterSpacing: "0.06em" }}>{label}</div>
-            <div style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.03em", color: C.text, lineHeight: 1 }}>
-              {value}<span style={{ fontSize: 13, fontWeight: 400, color: C.muted, marginLeft: 4 }}>{unit}</span>
-            </div>
+      {/* ── 프로필 헤더 ── */}
+      <div style={{ padding: "28px 20px 20px", position: "relative" }}>
+        {/* 설정 버튼 */}
+        <button onClick={() => setShowSettings(true)} style={{ position: "absolute", top: 28, right: 20, width: 34, height: 34, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 15, display: "flex", alignItems: "center", justifyContent: "center" }}>⚙</button>
+
+        {/* 아바타 + 이름 */}
+        <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 14 }}>
+          <div style={{ width: 64, height: 64, borderRadius: "50%", background: "linear-gradient(135deg, #6c8fff, #c77dff)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 26, flexShrink: 0 }}>
+            {user.avatar || user.name[0]}
           </div>
-        ))}
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em" }}>{user.name}</div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{user.handle}</div>
+          </div>
+        </div>
+
+        {/* 소개 */}
+        {user.bio && <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginBottom: 16 }}>{user.bio}</div>}
+
+        {/* 팔로워 / 팔로잉 */}
+        <div style={{ display: "flex", gap: 24 }}>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>{user.followers}</div>
+            <div style={{ fontSize: 10, color: C.muted, marginTop: 2, letterSpacing: "0.06em" }}>팔로워</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>{user.following}</div>
+            <div style={{ fontSize: 10, color: C.muted, marginTop: 2, letterSpacing: "0.06em" }}>팔로잉</div>
+          </div>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>{blackDays.length}</div>
+            <div style={{ fontSize: 10, color: C.muted, marginTop: 2, letterSpacing: "0.06em" }}>BLACK</div>
+          </div>
+        </div>
       </div>
 
-      {/* 이번 달 평균 진행률 */}
-      <div style={{ background: C.surface, borderRadius: radius.lg, padding: "18px", marginBottom: 16, border: `1px solid ${C.border}` }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-          <span style={{ fontSize: 12, color: C.muted }}>이번 달 평균 완료율</span>
-          <span style={{ fontSize: 20, fontWeight: 700, color: C.text }}>{avgProgress}%</span>
-        </div>
-        <div style={{ height: 6, background: C.card, borderRadius: 4, overflow: "hidden" }}>
-          <div style={{ height: "100%", width: `${avgProgress}%`, borderRadius: 4, background: `linear-gradient(90deg, #6c8fff, #c77dff)`, transition: "width 1s ease" }} />
-        </div>
-      </div>
+      <div style={{ height: 1, background: C.border, margin: "0 20px" }} />
 
-      {/* 요일별 완료율 바 차트 */}
-      <div style={{ background: C.surface, borderRadius: radius.lg, padding: "18px", marginBottom: 16, border: `1px solid ${C.border}` }}>
-        <div style={{ fontSize: 12, color: C.muted, marginBottom: 16 }}>요일별 평균 완료율</div>
-        <div style={{ display: "flex", gap: 6, alignItems: "flex-end", height: 80 }}>
-          {byDow.map(({ dow, avg, count }) => (
-            <div key={dow} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
-              <div style={{ width: "100%", background: C.card, borderRadius: 4, height: 64, display: "flex", alignItems: "flex-end", overflow: "hidden" }}>
-                <div style={{
-                  width: "100%", borderRadius: 4,
-                  height: `${Math.max(avg * 100, count > 0 ? 4 : 0)}%`,
-                  background: dow === 0 ? "#ff7070" : dow === 6 ? "#7090ff" : "#6c8fff",
-                  opacity: count > 0 ? 0.85 : 0.15,
-                  transition: "height 0.8s ease",
-                }} />
+      <div style={{ padding: "20px 20px 0" }}>
+        {/* 핵심 수치 */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 16 }}>
+          {[
+            { label: "완료한 할 일", value: totalDone,        unit: "개" },
+            { label: "활동한 날",    value: activeDays.length, unit: "일" },
+            { label: "BLACK 달성",   value: blackDays.length,  unit: "일" },
+            { label: "연속 달성",    value: streak,            unit: "일 연속" },
+          ].map(({ label, value, unit }) => (
+            <div key={label} style={{ background: C.surface, borderRadius: radius.lg, padding: "14px 16px", border: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 10, color: C.muted, marginBottom: 6, letterSpacing: "0.06em" }}>{label}</div>
+              <div style={{ fontSize: 26, fontWeight: 700, letterSpacing: "-0.03em", lineHeight: 1 }}>
+                {value}<span style={{ fontSize: 12, fontWeight: 400, color: C.muted, marginLeft: 3 }}>{unit}</span>
               </div>
-              <span style={{ fontSize: 10, color: dow===0?"#ff7070":dow===6?"#7090ff":C.muted }}>{DOW_KR[dow]}</span>
             </div>
           ))}
         </div>
+
+        {/* 평균 완료율 */}
+        <div style={{ background: C.surface, borderRadius: radius.lg, padding: "16px", marginBottom: 12, border: `1px solid ${C.border}` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 10 }}>
+            <span style={{ fontSize: 12, color: C.muted }}>이번 달 평균 완료율</span>
+            <span style={{ fontSize: 20, fontWeight: 700 }}>{avgProgress}%</span>
+          </div>
+          <div style={{ height: 5, background: C.card, borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${avgProgress}%`, borderRadius: 4, background: "linear-gradient(90deg, #6c8fff, #c77dff)", transition: "width 1s ease" }} />
+          </div>
+        </div>
+
+        {/* 요일별 차트 */}
+        <div style={{ background: C.surface, borderRadius: radius.lg, padding: "16px", marginBottom: 12, border: `1px solid ${C.border}` }}>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>요일별 평균 완료율</div>
+          <div style={{ display: "flex", gap: 5, alignItems: "flex-end", height: 72 }}>
+            {byDow.map(({ dow, avg, count }) => (
+              <div key={dow} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 5 }}>
+                <div style={{ width: "100%", background: C.card, borderRadius: 3, height: 56, display: "flex", alignItems: "flex-end", overflow: "hidden" }}>
+                  <div style={{ width: "100%", borderRadius: 3, height: `${Math.max(avg*100, count>0?4:0)}%`, background: dow===0?"#ff7070":dow===6?"#7090ff":"#6c8fff", opacity: count>0?0.85:0.15, transition: "height 0.8s ease" }} />
+                </div>
+                <span style={{ fontSize: 9, color: dow===0?"#ff7070":dow===6?"#7090ff":C.muted }}>{DOW_KR[dow]}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* 히트맵 */}
+        <div style={{ background: C.surface, borderRadius: radius.lg, padding: "16px", border: `1px solid ${C.border}` }}>
+          <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>이달 진행 현황</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3, marginBottom: 6 }}>
+            {DOW_KR.map((d,i) => <div key={d} style={{ textAlign: "center", fontSize: 9, color: i===0?"#ff7070":i===6?"#7090ff":C.dim }}>{d}</div>)}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3 }}>
+            {Array.from({ length: new Date(year, month, 1).getDay() }).map((_,i) => <div key={`e${i}`} />)}
+            {monthStats.map(({ day, prog, isBlack }) => {
+              const alpha = prog > 0 ? 0.2 + prog * 0.8 : 0;
+              const bg = isBlack ? "#fff" : prog > 0 ? `rgba(108,143,255,${alpha})` : C.card;
+              return (
+                <div key={day} style={{ aspectRatio: "1", borderRadius: 5, background: bg, display: "flex", alignItems: "center", justifyContent: "center", position: "relative" }}>
+                  <span style={{ fontSize: 9, color: isBlack?"#080808":prog>0.5?"#fff":C.muted, fontWeight: isBlack?700:400 }}>{day}</span>
+                  {isBlack && <div style={{ position: "absolute", inset: 0, borderRadius: 5, border: "1px solid rgba(255,255,255,0.4)" }} />}
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "center" }}>
+            <div style={{ width: 9, height: 9, borderRadius: 2, background: C.card, border: `1px solid ${C.border}` }} />
+            <span style={{ fontSize: 10, color: C.dim }}>없음</span>
+            <div style={{ width: 9, height: 9, borderRadius: 2, background: "rgba(108,143,255,0.6)" }} />
+            <span style={{ fontSize: 10, color: C.dim }}>진행중</span>
+            <div style={{ width: 9, height: 9, borderRadius: 2, background: "#fff" }} />
+            <span style={{ fontSize: 10, color: C.dim }}>BLACK</span>
+          </div>
+        </div>
       </div>
 
-      {/* 이달 달력 히트맵 */}
-      <div style={{ background: C.surface, borderRadius: radius.lg, padding: "18px", border: `1px solid ${C.border}` }}>
-        <div style={{ fontSize: 12, color: C.muted, marginBottom: 14 }}>이달 진행 현황</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4, marginBottom: 8 }}>
-          {DOW_KR.map((d, i) => (
-            <div key={d} style={{ textAlign: "center", fontSize: 9, color: i===0?"#ff7070":i===6?"#7090ff":C.dim }}>{d}</div>
-          ))}
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 4 }}>
-          {Array.from({ length: new Date(year, month, 1).getDay() }).map((_, i) => <div key={`e${i}`} />)}
-          {monthStats.map(({ day, prog, isBlack, drops, total }) => {
-            const alpha = prog > 0 ? 0.2 + prog * 0.8 : 0;
-            const bg    = isBlack ? "#fff" : prog > 0 ? `rgba(108,143,255,${alpha})` : C.card;
-            return (
-              <div key={day} style={{ aspectRatio: "1", borderRadius: 6, background: bg, display: "flex", alignItems: "center", justifyContent: "center", transition: "background 0.3s", position: "relative" }}>
-                <span style={{ fontSize: 9, color: isBlack ? "#080808" : prog > 0.5 ? "#fff" : C.muted, fontWeight: isBlack ? 700 : 400 }}>{day}</span>
-                {isBlack && <div style={{ position: "absolute", inset: 0, borderRadius: 6, border: "1px solid rgba(255,255,255,0.4)" }} />}
-              </div>
-            );
-          })}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
-          <div style={{ width: 10, height: 10, borderRadius: 2, background: C.card, border: `1px solid ${C.border}` }} />
-          <span style={{ fontSize: 10, color: C.dim }}>활동 없음</span>
-          <div style={{ width: 10, height: 10, borderRadius: 2, background: "rgba(108,143,255,0.6)" }} />
-          <span style={{ fontSize: 10, color: C.dim }}>진행 중</span>
-          <div style={{ width: 10, height: 10, borderRadius: 2, background: "#fff" }} />
-          <span style={{ fontSize: 10, color: C.dim }}>BLACK 달성</span>
-        </div>
-      </div>
+      {showSettings && <SettingsSheet settings={settings} updSetting={updSetting} user={user} setUser={setUser} onClose={() => setShowSettings(false)} />}
     </div>
   );
 }
 
 // ─────────────────────────────────────────────
+// Placeholder screens
+// ─────────────────────────────────────────────// ─────────────────────────────────────────────
 // Placeholder screens
 // ─────────────────────────────────────────────
 function PlaceholderScreen({ label, icon }) {
@@ -1385,19 +1644,77 @@ export default function MakeBlack() {
   const [paletteHistory, setPaletteHistory] = useState({});
   const [todosByDate, setTodosByDate]       = useState({});
   const [selectedDate, setSelectedDate]     = useState(getTodayKey);
+  // 전역 설정
+  const [settings, setSettings] = useState({
+    calStartSunday: true,
+    use24h: false,
+    language: "ko",
+    reminderTime: "09:00",
+    reminderOn: false,
+    blackAnimationOn: true,
+    paletteSize: "medium",
+    pinLock: false,
+    pin: "",
+    privacy: "public", // public | followers | private
+    theme: "dark", // dark | light
+  });
+  // 유저 프로필 (실제 서비스시 서버에서)
+  const [user, setUser] = useState({
+    name: "사용자", handle: "@user", bio: "매일 조금씩, 검정을 향해 ✦",
+    avatar: "", followers: 12, following: 8,
+    email: "user@makeblack.app",
+  });
+  const updSetting = (key, val) => setSettings(s => ({ ...s, [key]: val }));
+
+  // 테마 적용 — 렌더마다 C를 현재 테마로 갱신
+  C = THEMES[settings.theme] || THEMES.dark;
+
+  // PIN 잠금
+  const [pinUnlocked, setPinUnlocked] = useState(!settings.pinLock);
+  const [pinEntry, setPinEntry]       = useState("");
+  useEffect(() => { if (!settings.pinLock) setPinUnlocked(true); }, [settings.pinLock]);
+
+  if (settings.pinLock && !pinUnlocked) {
+    return (
+      <div style={{ maxWidth: 480, margin: "0 auto", minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 32 }}>
+        <div style={{ fontSize: 32, marginBottom: 8 }}>●</div>
+        <div style={{ fontSize: 18, fontWeight: 700, color: C.text, marginBottom: 4 }}>MakeBlack</div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 36 }}>PIN을 입력해주세요</div>
+        <div style={{ display: "flex", gap: 12, marginBottom: 28 }}>
+          {Array.from({ length: 4 }, (_, i) => (
+            <div key={i} style={{ width: 14, height: 14, borderRadius: "50%", background: pinEntry.length > i ? C.text : C.border2, transition: "background 0.15s" }} />
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, width: 220 }}>
+          {["1","2","3","4","5","6","7","8","9","","0","⌫"].map((k, i) => (
+            <button key={i} onClick={() => {
+              if (!k) return;
+              const next = k === "⌫" ? pinEntry.slice(0,-1) : pinEntry + k;
+              setPinEntry(next);
+              if (next.length === 4) {
+                if (next === settings.pin) { setPinUnlocked(true); setPinEntry(""); }
+                else { setTimeout(() => setPinEntry(""), 300); }
+              }
+            }} style={{ height: 52, borderRadius: radius.md, background: k ? C.surface : "transparent", border: k ? `1px solid ${C.border}` : "none", color: C.text, fontSize: 18, cursor: k ? "pointer" : "default", fontFamily: "inherit" }}>{k}</button>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", position: "relative", minHeight: "100vh", background: C.bg }}>
       {showOnboarding && <OnboardingOverlay onDone={() => { setShowOnboarding(false); }} />}
       {!showOnboarding && (
         <div style={{ display: tab === "home" ? "block" : "none" }}>
-          <HomeScreen cats={cats} setCats={setCats} ruts={ruts} setRuts={setRuts} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} todosByDate={todosByDate} setTodosByDate={setTodosByDate} selectedDate={selectedDate} setSelectedDate={setSelectedDate} />
+          <HomeScreen cats={cats} setCats={setCats} ruts={ruts} setRuts={setRuts} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} todosByDate={todosByDate} setTodosByDate={setTodosByDate} selectedDate={selectedDate} setSelectedDate={setSelectedDate} settings={settings} />
         </div>
       )}
       {tab === "search"  && <PlaceholderScreen label="검색" icon="◎" />}
       {tab === "friends" && <PlaceholderScreen label="친구" icon="◈" />}
-      {tab === "mypage"  && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} cats={cats} ruts={ruts} />}
+      {tab === "mypage"  && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} cats={cats} ruts={ruts} user={user} setUser={setUser} settings={settings} updSetting={updSetting} />}
       <BottomNav tab={tab} setTab={setTab} />
+      <style>{`:root { --bg: ${C.bg}; --text: ${C.text}; --dim: ${C.dim}; }`}</style>
       <style>{`
         @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
         @keyframes blackIn { from { opacity: 0; transform: scale(1.04) } to { opacity: 1; transform: scale(1) } }
@@ -1415,7 +1732,7 @@ export default function MakeBlack() {
         @keyframes slideDown { from { transform: translateX(-50%) translateY(-100%) } to { transform: translateX(-50%) translateY(0) } }
         @keyframes slideUp { from { transform: translateX(-50%) translateY(0) } to { transform: translateX(-50%) translateY(-108%) } }
         @keyframes pulse  { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(1.08)} }
-        input::placeholder { color: #2a2a2a; }
+        input::placeholder { color: var(--dim); }
         select option { background: #111; }
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
         ::-webkit-scrollbar { width: 0; }
