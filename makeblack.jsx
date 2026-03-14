@@ -226,8 +226,6 @@ const DEFAULT_CATEGORIES = [
   { id: 2, name: "운동", color: "#ff7c6e" },
 ];
 const DEFAULT_ROUTINES = [];
-function mockHistory() { return {}; }
-
 // ─── Onboarding ───
 function OnboardingOverlay({ onDone }) {
   const [step, setStep] = useState(0);
@@ -235,6 +233,7 @@ function OnboardingOverlay({ onDone }) {
     { icon: "🎨", title: "MakeBlack", desc: "할 일을 완료할 때마다\n물감이 팔레트에 퍼져나가요" },
     { icon: "✦",  title: "색이 섞여요", desc: "여러 할 일을 완료할수록\n색이 혼합되어 검정으로 가까워져요" },
     { icon: "●",  title: "BLACK 달성", desc: "모든 할 일을 완료하면\n팔레트가 BLACK이 돼요" },
+    { icon: "◈",  title: "팀 팔레트", desc: "친구와 팀을 만들어\n함께 팔레트를 BLACK으로 채워요\n각자의 색이 섞여 하나가 돼요" },
   ];
   const s = steps[step];
   return (
@@ -299,7 +298,7 @@ function Modal({ onClose, children, title }) {
       display: "flex", alignItems: "flex-end",
     }}>
       <div onClick={e => e.stopPropagation()} style={{
-        width: "100%", background: "#111",
+        width: "100%", background: C.surface,
         borderRadius: "26px 26px 0 0",
         padding: "0 20px 48px", maxHeight: "90vh", overflowY: "auto",
       }}>
@@ -705,10 +704,28 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
       const existing = catTodos.find(t => t.id === routineTodoId);
       if (!existing) {
         const saved = (todosByDate[dk]?.[rut.catId] || []).find(t => t.id === routineTodoId);
+        // 루틴 todo에 카테고리 색 부여 (체크박스, 완료 표시에 사용)
+        const rutCat = cats.find(ct => ct.id === rut.catId);
+        const rutHue = (() => {
+          if (!rutCat) return (rut.id * 47) % 360;
+          const col = rutCat.color;
+          // hex 색상 → RGB → HSL
+          if (col.startsWith('#')) {
+            const hex = col.replace('#','');
+            const r = parseInt(hex.slice(0,2),16), g = parseInt(hex.slice(2,4),16), b = parseInt(hex.slice(4,6),16);
+            return rgbToHsl(r, g, b)[0];
+          }
+          // hsl() 형식
+          const m = col.match(/\d+/g);
+          return m ? Number(m[0]) : (rut.id * 47) % 360;
+        })();
+        const rutRgb = hslToRgb(rutHue, 72, 56);
         result[rut.catId] = [{
           id: routineTodoId, text: rut.name,
           done: saved?.done ?? false,
-          routineId: rut.id, hue: 0, rgb: [160,160,160], color: "#888", seed: rut.id * 7
+          routineId: rut.id,
+          hue: rutHue, rgb: rutRgb, color: `hsl(${Math.round(rutHue)},72%,56%)`,
+          seed: rut.id * 7
         }, ...catTodos];
       }
     });
@@ -827,8 +844,11 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
       return { ...prev, [selectedDate]: { ...base, [catId]: (base[catId] || []).filter(t => t.id !== todoId) } };
     });
     setPaletteHistory(prev => {
-      const entry = prev[selectedDate] || { drops: [] };
-      return { ...prev, [selectedDate]: { ...entry, drops: entry.drops.filter(d => d.id !== todoId) } };
+      const entry = prev[selectedDate] || { drops: [], total: 0 };
+      const newDrops = entry.drops.filter(d => d.id !== todoId);
+      // total도 1 감소 동기화
+      const newTotal = Math.max(0, (entry.total || 0) - 1);
+      return { ...prev, [selectedDate]: { drops: newDrops, total: newTotal } };
     });
     setCanvasVer(v => v + 1);
   };
@@ -869,36 +889,6 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
   const mixedCss = mixedHsl ? `hsl(${mixedHsl[0]|0},${mixedHsl[1]|0}%,${mixedHsl[2]|0}%)` : null;
   const isToday  = selectedDate === todayKey;
 
-  // ── 팔레트 이미지 공유 ──
-  const sharePalette = () => {
-    // 오프스크린 캔버스에 팔레트 + 날짜 텍스트 렌더
-    const SIZE = 600;
-    const cv = document.createElement("canvas");
-    cv.width = SIZE; cv.height = SIZE + 80;
-    const ctx = cv.getContext("2d");
-    // 배경
-    ctx.fillStyle = "#0a0a0a";
-    ctx.fillRect(0, 0, SIZE, SIZE + 80);
-    // 팔레트
-    const tmp = document.createElement("canvas");
-    tmp.width = SIZE; tmp.height = SIZE;
-    renderPalette(tmp, drops, totalCount, SIZE);
-    ctx.drawImage(tmp, 0, 0);
-    // 날짜 텍스트
-    ctx.fillStyle = "#f0ece6";
-    ctx.font = "bold 22px -apple-system, sans-serif";
-    ctx.textAlign = "center";
-    const label = isToday ? "오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" });
-    ctx.fillText(`${label}의 팔레트`, SIZE / 2, SIZE + 34);
-    ctx.fillStyle = "#555";
-    ctx.font = "14px -apple-system, sans-serif";
-    ctx.fillText(`MakeBlack · ${doneCount}/${totalCount} 완료`, SIZE / 2, SIZE + 60);
-    // 다운로드
-    const a = document.createElement("a");
-    a.href = cv.toDataURL("image/png");
-    a.download = `makeblack-${selectedDate}.png`;
-    a.click();
-  };
 
   // Gradient progress bar: left=first drop color, right=mixed color, darkens toward black
   const progressGradient = (() => {
@@ -964,7 +954,7 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
       {/* ── Calendar sheet ── */}
       {showCal && (
         <div style={{ position: "fixed", inset: 0, zIndex: 150, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(10px)" }} onClick={() => closeCalendar()}>
-          <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#111", borderRadius: "0 0 28px 28px", padding: "20px 18px 28px", animation: calClosing ? "slideUp 0.3s cubic-bezier(0.4,0,0.6,1) forwards" : "slideDown 0.2s cubic-bezier(0.22,1,0.36,1)" }}>
+          <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: C.surface, borderRadius: "0 0 28px 28px", padding: "20px 18px 28px", animation: calClosing ? "slideUp 0.3s cubic-bezier(0.4,0,0.6,1) forwards" : "slideDown 0.2s cubic-bezier(0.22,1,0.36,1)" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
               <button onClick={() => goMonth(-1)} style={{ width: 34, height: 34, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 18, fontFamily: "inherit" }}>‹</button>
               <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em" }}>{calYear}년 {monthName}</span>
@@ -1050,8 +1040,7 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <button onClick={() => setShowCal(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>캘린더</button>
-            <button onClick={sharePalette} disabled={drops.length === 0} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: drops.length > 0 ? C.muted : C.dim, cursor: drops.length > 0 ? "pointer" : "default", fontSize: 11, fontFamily: "inherit", opacity: drops.length > 0 ? 1 : 0.4 }}>공유</button>
-            <button onClick={() => setShowCatMgr(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>카테고리</button>
+<button onClick={() => setShowCatMgr(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>카테고리</button>
           </div>
         </div>
 
@@ -1203,7 +1192,7 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
   const [section, setSection] = useState(null); // null | "account" | "privacy" | "app" | "palette" | "pin" | "notification"
   const [pinInput, setPinInput] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
-  const [pinStep, setPinStep] = useState(1);
+  const [pinStep, setPinStep] = useState(() => settings.pin ? 0 : 1); // 기존 PIN 있으면 확인부터
   const [editField, setEditField] = useState(null); // { key, value }
 
   const S_BORDER = { borderBottom: `1px solid ${C.border}` };
@@ -1223,8 +1212,8 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 250, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "flex-end" }}>
-      <div onClick={e => e.stopPropagation()} style={{ width: "100%", background: "#111", borderRadius: "26px 26px 0 0", maxHeight: "90vh", overflowY: "auto" }}>
-        <div style={{ width: 34, height: 4, borderRadius: 2, background: "#252525", margin: "14px auto 0" }} />
+      <div onClick={e => e.stopPropagation()} style={{ width: "100%", background: C.surface, borderRadius: "26px 26px 0 0", maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ width: 34, height: 4, borderRadius: 2, background: C.border2, margin: "14px auto 0" }} />
 
         {/* 헤더 */}
         <div style={{ display: "flex", alignItems: "center", padding: "14px 20px 10px", gap: 10 }}>
@@ -1358,27 +1347,45 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
             </SettingRow>
             {settings.pinLock && (
               <div style={{ marginTop: 16 }}>
-                <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>{pinStep === 1 ? "새 PIN 4자리 입력" : "PIN 확인 (다시 입력)"}</div>
+                {/* 기존 PIN이 있으면 먼저 확인 (step 0) */}
+                <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>
+                  {pinStep === 0 ? "현재 PIN을 입력해주세요"
+                   : pinStep === 1 ? "새 PIN 4자리 입력"
+                   : "PIN 확인 (다시 입력)"}
+                </div>
                 <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
-                  {Array.from({ length: 4 }, (_, i) => (
-                    <div key={i} style={{ width: 42, height: 52, borderRadius: radius.sm, background: C.card, border: `1px solid ${(pinStep === 1 ? pinInput : pinConfirm).length > i ? "#6c8fff" : C.border2}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, color: C.text }}>
-                      {(pinStep === 1 ? pinInput : pinConfirm).length > i ? "●" : ""}
-                    </div>
-                  ))}
+                  {Array.from({ length: 4 }, (_, i) => {
+                    const cur = pinStep === 0 ? pinConfirm : pinStep === 1 ? pinInput : pinConfirm;
+                    return (
+                      <div key={i} style={{ width: 42, height: 52, borderRadius: radius.sm, background: C.card, border: `1px solid ${cur.length > i ? "#6c8fff" : C.border2}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, color: C.text }}>
+                        {cur.length > i ? "●" : ""}
+                      </div>
+                    );
+                  })}
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
                   {["1","2","3","4","5","6","7","8","9","","0","⌫"].map((k, i) => (
                     <button key={i} onClick={() => {
                       if (!k) return;
-                      const setter = pinStep === 1 ? setPinInput : setPinConfirm;
-                      const val    = pinStep === 1 ? pinInput : pinConfirm;
-                      if (k === "⌫") { setter(val.slice(0, -1)); return; }
-                      const next = val + k;
-                      setter(next);
-                      if (next.length === 4) {
-                        if (pinStep === 1) { setPinStep(2); }
-                        else if (next === pinInput) { updSetting("pin", pinInput); alert("PIN이 설정됐어요"); setPinStep(1); setPinInput(""); setPinConfirm(""); }
-                        else { alert("PIN이 일치하지 않아요"); setPinStep(1); setPinInput(""); setPinConfirm(""); }
+                      if (pinStep === 0) {
+                        // 기존 PIN 확인
+                        const next = k === "⌫" ? pinConfirm.slice(0,-1) : pinConfirm + k;
+                        setPinConfirm(next);
+                        if (next.length === 4) {
+                          if (next === settings.pin) { setPinStep(1); setPinConfirm(""); }
+                          else { setTimeout(() => setPinConfirm(""), 300); }
+                        }
+                      } else {
+                        const setter = pinStep === 1 ? setPinInput : setPinConfirm;
+                        const val    = pinStep === 1 ? pinInput : pinConfirm;
+                        if (k === "⌫") { setter(val.slice(0, -1)); return; }
+                        const next = val + k;
+                        setter(next);
+                        if (next.length === 4) {
+                          if (pinStep === 1) { setPinStep(2); }
+                          else if (next === pinInput) { updSetting("pin", pinInput); setPinStep(settings.pin ? 0 : 1); setPinInput(""); setPinConfirm(""); }
+                          else { setTimeout(() => { setPinStep(1); setPinInput(""); setPinConfirm(""); }, 300); }
+                        }
                       }
                     }} style={{ height: 48, borderRadius: radius.md, background: k ? C.card : "transparent", border: k ? `1px solid ${C.border}` : "none", color: C.text, fontSize: 18, cursor: k ? "pointer" : "default", fontFamily: "inherit" }}>{k}</button>
                   ))}
@@ -1416,7 +1423,7 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
   );
 }
 
-function MyPageScreen({ paletteHistory, todosByDate, cats, ruts, user, setUser, settings, updSetting }) {
+function MyPageScreen({ paletteHistory, todosByDate, cats, ruts, user, setUser, settings, updSetting, friends, onTabChange }) {
   const [showSettings, setShowSettings] = useState(false);
   const now   = new Date();
   const year  = now.getFullYear();
@@ -1461,7 +1468,24 @@ function MyPageScreen({ paletteHistory, todosByDate, cats, ruts, user, setUser, 
   const blackDays   = monthStats.filter(d => d.isBlack);
   const avgProgress = activeDays.length > 0 ? Math.round(activeDays.reduce((s, d) => s + d.prog, 0) / activeDays.length * 100) : 0;
   const totalDone   = monthStats.reduce((s, d) => s + d.done, 0);
-  const streak      = (() => { let s = 0; for (let i = now.getDate()-1; i>=0; i--) { if (monthStats[i]?.isBlack) s++; else break; } return s; })();
+  const streak = (() => {
+    let s = 0;
+    // 오늘부터 역순으로 — 전달까지 거슬러 올라감
+    let cur = new Date(now); cur.setHours(0,0,0,0);
+    while (true) {
+      const dk = dateKey(cur);
+      const hist = paletteHistory[dk];
+      const dayTodos = getMyPageTodos(dk);
+      const total = hist?.total || dayTodos.length;
+      const done  = dayTodos.filter(t => t.done).length;
+      const isB   = total > 0 && done >= total;
+      if (!isB) break;
+      s++;
+      cur.setDate(cur.getDate() - 1);
+      if (s > 365) break; // 무한루프 방지
+    }
+    return s;
+  })();
   const byDow       = Array.from({ length: 7 }, (_, dow) => { const days = monthStats.filter(d => new Date(d.dk+"T00:00:00").getDay()===dow && d.total>0); return { dow, avg: days.length>0 ? days.reduce((s,d)=>s+d.prog,0)/days.length : 0, count: days.length }; });
   const DOW_KR      = ["일","월","화","수","목","금","토"];
   const monthName   = now.toLocaleString("ko-KR", { month: "long" });
@@ -1490,18 +1514,16 @@ function MyPageScreen({ paletteHistory, todosByDate, cats, ruts, user, setUser, 
 
         {/* 팔로워 / 팔로잉 */}
         <div style={{ display: "flex", gap: 24 }}>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 18, fontWeight: 700 }}>{user.followers}</div>
-            <div style={{ fontSize: 10, color: C.muted, marginTop: 2, letterSpacing: "0.06em" }}>팔로워</div>
-          </div>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 18, fontWeight: 700 }}>{user.following}</div>
-            <div style={{ fontSize: 10, color: C.muted, marginTop: 2, letterSpacing: "0.06em" }}>팔로잉</div>
-          </div>
-          <div style={{ textAlign: "center" }}>
-            <div style={{ fontSize: 18, fontWeight: 700 }}>{blackDays.length}</div>
-            <div style={{ fontSize: 10, color: C.muted, marginTop: 2, letterSpacing: "0.06em" }}>BLACK</div>
-          </div>
+          {[
+            { label: "팔로워", value: user.followers, onClick: null },
+            { label: "팔로잉", value: friends?.length ?? user.following, onClick: () => onTabChange?.("search") },
+            { label: "BLACK",  value: blackDays.length, onClick: null },
+          ].map(({ label, value, onClick }) => (
+            <div key={label} onClick={onClick} style={{ textAlign:"center", cursor: onClick ? "pointer" : "default" }}>
+              <div style={{ fontSize: 18, fontWeight: 700 }}>{value}</div>
+              <div style={{ fontSize: 10, color: onClick ? C.muted : C.dim, marginTop: 2, letterSpacing: "0.06em", textDecoration: onClick ? "underline" : "none", textUnderlineOffset: 3 }}>{label}</div>
+            </div>
+          ))}
         </div>
       </div>
 
@@ -1655,12 +1677,16 @@ function CreateTeamModal({ myHandle, onClose, onCreate }) {
 }
 
 // 멤버 초대 모달
-function InviteModal({ team, onClose, onInvite }) {
+function InviteModal({ team, onClose, onInvite, friends }) {
   const [handle, setHandle] = useState("");
+  const alreadyMember = (h) => team.members.some(m => m.handle === h);
+  // 친구 중 아직 팀 멤버가 아닌 사람
+  const invitableFriends = (friends || []).filter(f => !alreadyMember(f.handle));
   return (
     <Modal onClose={onClose} title="멤버 초대">
-      <div style={{ fontSize: 12, color: C.muted, marginBottom: 16 }}>초대할 사람의 아이디를 입력하세요</div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+      {/* 아이디 직접 입력 */}
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>아이디로 초대</div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
         <input value={handle} onChange={e => setHandle(e.target.value)}
           onKeyDown={e => e.key === "Enter" && handle.trim() && onInvite(handle.trim())}
           placeholder="@아이디"
@@ -1668,8 +1694,22 @@ function InviteModal({ team, onClose, onInvite }) {
         <button onClick={() => handle.trim() && onInvite(handle.trim())}
           style={{ padding: "10px 16px", background: C.text, border: "none", borderRadius: radius.sm, color: C.bg, cursor: "pointer", fontWeight: 700, fontFamily: "inherit" }}>초대</button>
       </div>
+      {/* 팔로잉 친구 목록 */}
+      {invitableFriends.length > 0 && (<>
+        <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>팔로잉에서 초대</div>
+        {invitableFriends.map((f, i) => (
+          <div key={f.handle} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
+            <div style={{ width:32, height:32, borderRadius:"50%", background:`linear-gradient(135deg,hsl(${(f.handle.length*37)%360},60%,55%),hsl(${(f.handle.length*67)%360},60%,45%))`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:700, color:"#fff" }}>{f.name[0]}</div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontSize:13, color:C.text }}>{f.name}</div>
+              <div style={{ fontSize:10, color:C.muted }}>{f.handle}</div>
+            </div>
+            <button onClick={() => onInvite(f.handle)} style={{ padding:"6px 12px", background:C.text, border:"none", borderRadius:radius.full, color:C.bg, cursor:"pointer", fontSize:11, fontWeight:700, fontFamily:"inherit" }}>초대</button>
+          </div>
+        ))}
+      </>)}
       {/* 현재 멤버 */}
-      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>현재 멤버 {team.members.length}명</div>
+      <div style={{ fontSize: 11, color: C.muted, margin: "16px 0 10px" }}>현재 멤버 {team.members.length}명</div>
       {team.members.map((m, i) => {
         const mc = getMemberColor(i);
         return (
@@ -1679,7 +1719,7 @@ function InviteModal({ team, onClose, onInvite }) {
               <div style={{ fontSize: 13, color: C.text }}>{m.name}</div>
               <div style={{ fontSize: 10, color: C.muted }}>{m.handle}</div>
             </div>
-            <div style={{ marginLeft: "auto", width: 10, height: 10, borderRadius: "50%", background: mc.base, boxShadow: `0 0 6px ${mc.base}` }} />
+            {i === 0 && <span style={{ marginLeft:"auto", fontSize:9, color:C.dim, background:C.surface, padding:"2px 6px", borderRadius:4 }}>팀장</span>}
           </div>
         );
       })}
@@ -1688,7 +1728,7 @@ function InviteModal({ team, onClose, onInvite }) {
 }
 
 // 팀 상세 화면
-function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDelete }) {
+function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDelete, friends }) {
   const [activeTab, setActiveTab]     = useState("todo");   // "todo" | "calendar"
   const [selectedDate, setSelectedDate] = useState(getTodayKey);
   const [showCal, setShowCal]         = useState(false);
@@ -1705,11 +1745,14 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
   const [animDrop, setAnimDrop]       = useState(null);
   const [showInvite, setShowInvite]   = useState(false);
   const [showMenu, setShowMenu]       = useState(false);
-  const [confirmAction, setConfirmAction] = useState(null); // 'leave' | 'delete'
+  const [confirmAction, setConfirmAction] = useState(null);
+  const [editingTeam, setEditingTeam]   = useState(false);
+  const [editName, setEditName]         = useState(team.name);
+  const [editDesc, setEditDesc]         = useState(team.desc||'');
   const inputRef   = useRef(null);
   const blackTimer = useRef(null);
   const targetCellRef = useRef(null);
-  const todayKey   = getTodayKey();
+  const [todayKey] = useState(getTodayKey);
 
   const myIdx   = team.members.findIndex(m => m.handle === myHandle);
   const myColor = getMemberColor(myIdx >= 0 ? myIdx : 0);
@@ -1736,6 +1779,19 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
   const histEntry  = (team.paletteHistory || {})[selectedDate] || { drops: [], total: 0 };
   const drops      = histEntry.drops || [];
   const isToday    = selectedDate === todayKey;
+
+  // 팀 캘린더 월별 캐시
+  const teamCalCache = useMemo(() => {
+    const cache = {};
+    const y = viewMonth.y, m = viewMonth.m;
+    const days = new Date(y, m+1, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      const dk = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const todos = Object.values(getTeamTodosForDate(dk)).flat();
+      cache[dk] = { hasTodos: todos.length > 0, hasIncomplete: todos.some(t => !t.done) };
+    }
+    return cache;
+  }, [viewMonth, team.todosByDate, team.cats]);
 
   // 선택된 날짜 변경 시 BLACK 초기화
   useEffect(() => { setBlackPhase(null); clearTimeout(blackTimer.current); setCanvasVer(v => v+1); }, [selectedDate]);
@@ -1905,7 +1961,7 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
       {/* 캘린더 시트 */}
       {showCal && (
         <div style={{ position:"fixed", inset:0, zIndex:150, background:"rgba(0,0,0,0.65)", backdropFilter:"blur(10px)" }} onClick={() => closeCalendar()}>
-          <div onClick={e=>e.stopPropagation()} style={{ position:"absolute", top:0, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, background:"#111", borderRadius:"0 0 28px 28px", padding:"20px 18px 28px", animation: calClosing?"slideUp 0.3s cubic-bezier(0.4,0,0.6,1) forwards":"slideDown 0.2s cubic-bezier(0.22,1,0.36,1)" }}>
+          <div onClick={e=>e.stopPropagation()} style={{ position:"absolute", top:0, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:480, background:C.surface, borderRadius:"0 0 28px 28px", padding:"20px 18px 28px", animation: calClosing?"slideUp 0.3s cubic-bezier(0.4,0,0.6,1) forwards":"slideDown 0.2s cubic-bezier(0.22,1,0.36,1)" }}>
             <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:16 }}>
               <button onClick={()=>goMonth(-1)} style={{ width:34, height:34, borderRadius:"50%", background:C.surface, border:`1px solid ${C.border}`, color:C.muted, cursor:"pointer", fontSize:18, fontFamily:"inherit" }}>‹</button>
               <span style={{ fontSize:15, fontWeight:700 }}>{calYear}년 {monthName}</span>
@@ -1926,8 +1982,8 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
                 const hist=(team.paletteHistory||{})[dk];
                 const dow=new Date(dk+"T00:00:00").getDay();
                 const isDone=hist?.total>0&&(hist.drops?.length||0)>=hist.total;
-                const dayTodos=Object.values(getTeamTodosForDate(dk)).flat();
-                const hasInc=dayTodos.some(t=>!t.done)&&dayTodos.length>0;
+                const _tc=teamCalCache[dk]||{hasTodos:false,hasIncomplete:false};
+                const hasInc=_tc.hasIncomplete;
                 const numColor=dow===0?"#ff7070":dow===6?"#7090ff":hasInc?C.text:isDone?"#444":"#3a3a3a";
                 return (
                   <div key={day} ref={isSel?targetCellRef:null} onClick={()=>{setSelectedDate(dk);closeCalendar();}} style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:2, cursor:"pointer", padding:"3px 1px", borderRadius:radius.sm, background:isSel?"#222":"transparent",
@@ -1969,6 +2025,9 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
         {showMenu && (
           <div onClick={()=>setShowMenu(false)} style={{ position:"fixed",inset:0,zIndex:200 }}>
             <div onClick={e=>e.stopPropagation()} style={{ position:"absolute",top:56,right:18,background:C.surface,borderRadius:radius.md,border:`1px solid ${C.border2}`,overflow:"hidden",minWidth:140,boxShadow:"0 8px 24px rgba(0,0,0,0.4)",zIndex:201 }}>
+              {isOwner && (
+                <button onClick={()=>{setShowMenu(false);setEditName(team.name);setEditDesc(team.desc||'');setEditingTeam(true);}} style={{ width:"100%",padding:"13px 16px",background:"none",border:"none",borderBottom:`1px solid ${C.border}`,color:C.text,cursor:"pointer",fontSize:13,textAlign:"left",fontFamily:"inherit" }}>팀 정보 수정</button>
+              )}
               {!isOwner && (
                 <button onClick={()=>{setShowMenu(false);setConfirmAction("leave");}} style={{ width:"100%",padding:"13px 16px",background:"none",border:"none",borderBottom:`1px solid ${C.border}`,color:"#ff9f43",cursor:"pointer",fontSize:13,textAlign:"left",fontFamily:"inherit" }}>팀 나가기</button>
               )}
@@ -1991,6 +2050,20 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
                 style={{ flex:1,padding:"9px",background:confirmAction==="delete"?"#ff4444":"#ff9f43",border:"none",borderRadius:radius.sm,color:"#fff",cursor:"pointer",fontWeight:700,fontFamily:"inherit",fontSize:12 }}>
                 {confirmAction==="delete"?"삭제":"나가기"}
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* 팀 정보 수정 */}
+        {editingTeam && (
+          <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:radius.md, padding:"14px", marginBottom:10 }}>
+            <div style={{ fontSize:11, color:C.muted, marginBottom:8 }}>팀 이름</div>
+            <input value={editName} onChange={e=>setEditName(e.target.value)} style={{ width:"100%", boxSizing:"border-box", background:C.card, border:`1px solid ${C.border2}`, borderRadius:radius.sm, padding:"9px 12px", color:C.text, fontSize:13, outline:"none", fontFamily:"inherit", marginBottom:10 }}/>
+            <div style={{ fontSize:11, color:C.muted, marginBottom:8 }}>설명</div>
+            <input value={editDesc} onChange={e=>setEditDesc(e.target.value)} placeholder="팀 설명 (선택)" style={{ width:"100%", boxSizing:"border-box", background:C.card, border:`1px solid ${C.border2}`, borderRadius:radius.sm, padding:"9px 12px", color:C.text, fontSize:13, outline:"none", fontFamily:"inherit", marginBottom:12 }}/>
+            <div style={{ display:"flex", gap:8 }}>
+              <button onClick={()=>setEditingTeam(false)} style={{ flex:1, padding:"9px", background:"transparent", border:`1px solid ${C.border2}`, borderRadius:radius.sm, color:C.muted, cursor:"pointer", fontFamily:"inherit", fontSize:12 }}>취소</button>
+              <button onClick={()=>{ if(editName.trim()) onUpdate({...team, name:editName.trim(), desc:editDesc.trim()}); setEditingTeam(false); }} style={{ flex:1, padding:"9px", background:C.text, border:"none", borderRadius:radius.sm, color:C.bg, cursor:"pointer", fontWeight:700, fontFamily:"inherit", fontSize:12 }}>저장</button>
             </div>
           </div>
         )}
@@ -2081,7 +2154,9 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
                       </div>
                       <span style={{ flex:1,fontSize:13,color:todo.done?C.muted:C.text,textDecoration:todo.done?"line-through":"none" }}>{todo.text}</span>
                       <div style={{ width:18,height:18,borderRadius:"50%",background:ac.base+"25",border:`1.5px solid ${ac.base}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,color:ac.base,flexShrink:0 }} title={todo.authorName}>{todo.authorName[0]}</div>
-                      <button onClick={()=>deleteTodo(cat.id,todo.id)} style={{ background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:13,padding:0,lineHeight:1,flexShrink:0 }}>✕</button>
+                      {(todo.author===myHandle||isOwner) && (
+                        <button onClick={()=>deleteTodo(cat.id,todo.id)} style={{ background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:13,padding:0,lineHeight:1,flexShrink:0 }}>✕</button>
+                      )}
                     </div>
                   );
                 })}
@@ -2105,13 +2180,13 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
         )}
       </div>
 
-      {showInvite&&<InviteModal team={team} onClose={()=>setShowInvite(false)} onInvite={inviteMember}/>}
+      {showInvite&&<InviteModal team={team} onClose={()=>setShowInvite(false)} onInvite={inviteMember} friends={friends}/>}
     </div>
   );
 }
 
 // 팀 목록 (검색 포함)
-function TeamScreen({ myHandle, myName, settings }) {
+function TeamScreen({ myHandle, myName, settings, friends }) {
   const [teams, setTeams]         = useState(DEMO_TEAMS(myHandle, myName));
   const [showCreate, setShowCreate] = useState(false);
   const [activeTeam, setActiveTeam] = useState(null);
@@ -2126,7 +2201,7 @@ function TeamScreen({ myHandle, myName, settings }) {
     const team = {
       id: uid(), name, desc,
       members: [{ handle: myHandle, name: myName, avatar: "" }],
-      todos: [], drops: [], createdAt: Date.now(),
+      cats: [], todosByDate: {}, paletteHistory: {}, createdAt: Date.now(),
     };
     setTeams(ts => [team, ...ts]);
     setShowCreate(false);
@@ -2134,7 +2209,11 @@ function TeamScreen({ myHandle, myName, settings }) {
   };
 
   const leaveTeam = (teamId, handle) => {
-    setTeams(ts => ts.map(t => t.id===teamId ? {...t, members: t.members.filter(m=>m.handle!==handle)} : t));
+    setTeams(ts => {
+      const updated = ts.map(t => t.id===teamId ? {...t, members: t.members.filter(m=>m.handle!==handle)} : t);
+      // 마지막 멤버가 나가면 팀 자동 삭제
+      return updated.filter(t => t.members.length > 0);
+    });
     setActiveTeam(null);
   };
   const deleteTeam = (teamId) => {
@@ -2142,7 +2221,7 @@ function TeamScreen({ myHandle, myName, settings }) {
     setActiveTeam(null);
   };
 
-  if (activeTeam) return <TeamDetail team={activeTeam} myHandle={myHandle} onBack={() => setActiveTeam(null)} onUpdate={updateTeam} settings={settings} onLeave={leaveTeam} onDelete={deleteTeam} />;
+  if (activeTeam) return <TeamDetail team={activeTeam} myHandle={myHandle} onBack={() => setActiveTeam(null)} onUpdate={updateTeam} settings={settings} onLeave={leaveTeam} onDelete={deleteTeam} friends={friends} />;
 
   const filtered = teams.filter(t => t.name.toLowerCase().includes(searchQuery.toLowerCase()));
 
@@ -2173,15 +2252,20 @@ function TeamScreen({ myHandle, myName, settings }) {
           </div>
         )}
         {filtered.map(team => {
-          const done  = team.todos.filter(t => t.done).length;
-          const total = team.todos.length;
+          // todosByDate 전체 집계
+          const allTeamTodos = Object.values(team.todosByDate || {}).flatMap(byDate => Object.values(byDate).flat());
+          const done  = allTeamTodos.filter(t => t.done).length;
+          const total = allTeamTodos.length;
           const prog  = total > 0 ? done / total : 0;
+          // 팔레트: 가장 최근 날짜의 drops 사용
+          const latestDate = Object.keys(team.paletteHistory || {}).sort().pop();
+          const latestDrops = latestDate ? (team.paletteHistory[latestDate]?.drops || []) : [];
           return (
             <div key={team.id} onClick={() => setActiveTeam(team)} style={{ padding: "14px", marginBottom: 10, background: C.surface, borderRadius: radius.lg, border: `1px solid ${C.border}`, cursor: "pointer", transition: "border-color 0.15s" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
                 {/* 팀 팔레트 미니 */}
                 <div style={{ width: 44, height: 44, borderRadius: radius.sm, overflow: "hidden", flexShrink: 0, border: `1px solid ${C.border}` }}>
-                  <TeamPaletteCanvas drops={team.drops || []} totalCount={total} size={44} />
+                  <TeamPaletteCanvas drops={latestDrops} totalCount={total} size={44} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{team.name}</div>
@@ -2215,27 +2299,28 @@ function TeamScreen({ myHandle, myName, settings }) {
   );
 }
 
-// 데모 팀 데이터
+// 팀 데이터 구조: { id, name, desc, members, cats, todosByDate, paletteHistory, createdAt }
 function DEMO_TEAMS(myHandle, myName) {
   const me = { handle: myHandle, name: myName, avatar: "" };
   const b  = { handle: "@bora", name: "보라", avatar: "" };
-  const c  = { handle: "@chan", name: "찬", avatar: "" };
-  const drop1 = { id: 901, rgb: hslToRgb(220,78,58), hue: 220, color: "hsl(220,78%,58%)", px: 0.3, py: 0.4, seed: 9901 };
-  const drop2 = { id: 902, rgb: hslToRgb(0,78,58),   hue: 0,   color: "hsl(0,78%,58%)",   px: 0.65, py: 0.55, seed: 9902 };
-  return [
-    {
-      id: 1, name: "졸업 프로젝트 A팀", desc: "UI/UX 디자인 프로젝트",
-      members: [me, b, c],
-      todos: [
-        { id: 101, text: "기획서 초안 작성", done: true,  author: myHandle, authorName: myName, color: "hsl(220,78%,58%)", rgb: hslToRgb(220,78,58), hue: 220, px: 0.3,  py: 0.4,  seed: 9901 },
-        { id: 102, text: "와이어프레임 제작", done: true, author: "@bora",   authorName: "보라",  color: "hsl(0,78%,58%)",   rgb: hslToRgb(0,78,58),   hue: 0,   px: 0.65, py: 0.55, seed: 9902 },
-        { id: 103, text: "프로토타입 구현",   done: false, author: "@chan",   authorName: "찬",    color: "hsl(140,78%,58%)", rgb: hslToRgb(140,78,58), hue: 140, px: 0.5,  py: 0.3,  seed: 9903 },
-        { id: 104, text: "발표 자료 준비",    done: false, author: myHandle, authorName: myName,  color: "hsl(220,78%,58%)", rgb: hslToRgb(220,78,58), hue: 220, px: 0.4,  py: 0.7,  seed: 9904 },
-      ],
-      drops: [drop1, drop2],
-      createdAt: Date.now() - 86400000 * 3,
-    },
-  ];
+  const ch = { handle: "@chan", name: "찬", avatar: "" };
+  const today = getTodayKey();
+  const cat1 = { id: 801, name: "기획", color: getMemberColor(0).base };
+  const cat2 = { id: 802, name: "개발", color: getMemberColor(1).base };
+  const t1 = { id: 101, text: "기획서 초안 작성",  done: true,  author: myHandle,  authorName: myName, color: getMemberColor(0).color, rgb: getMemberColor(0).rgb, hue: getMemberColor(0).hue, px: 0.3,  py: 0.4,  seed: 9901 };
+  const t2 = { id: 102, text: "와이어프레임 제작", done: true,  author: "@bora",   authorName: "보라", color: getMemberColor(1).color, rgb: getMemberColor(1).rgb, hue: getMemberColor(1).hue, px: 0.65, py: 0.55, seed: 9902 };
+  const t3 = { id: 103, text: "프로토타입 구현",   done: false, author: "@chan",    authorName: "찬",   color: getMemberColor(2).color, rgb: getMemberColor(2).rgb, hue: getMemberColor(2).hue, px: 0.5,  py: 0.3,  seed: 9903 };
+  const t4 = { id: 104, text: "발표 자료 준비",    done: false, author: myHandle,  authorName: myName, color: getMemberColor(0).color, rgb: getMemberColor(0).rgb, hue: getMemberColor(0).hue, px: 0.4,  py: 0.7,  seed: 9904 };
+  const drop1 = { id: 101, rgb: getMemberColor(0).rgb, hue: getMemberColor(0).hue, color: getMemberColor(0).color, px: 0.3,  py: 0.4,  seed: 9901 };
+  const drop2 = { id: 102, rgb: getMemberColor(1).rgb, hue: getMemberColor(1).hue, color: getMemberColor(1).color, px: 0.65, py: 0.55, seed: 9902 };
+  return [{
+    id: 1, name: "졸업 프로젝트 A팀", desc: "UI/UX 디자인 프로젝트",
+    members: [me, b, ch],
+    cats: [cat1, cat2],
+    todosByDate: { [today]: { [cat1.id]: [t1, t2], [cat2.id]: [t3, t4] } },
+    paletteHistory: { [today]: { drops: [drop1, drop2], total: 4 } },
+    createdAt: Date.now() - 86400000 * 3,
+  }];
 }
 
 
@@ -2423,7 +2508,7 @@ function BottomNav({ tab, setTab }) {
     <div style={{
       position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)",
       width: "100%", maxWidth: 480,
-      background: "rgba(10,10,10,0.88)", backdropFilter: "blur(16px)",
+      background: C.bg + "e0", backdropFilter: "blur(16px)",
       borderTop: `1px solid ${C.border}`,
       display: "flex", height: 68, zIndex: 100,
     }}>
@@ -2485,7 +2570,8 @@ export default function MakeBlack() {
   // 테마 적용 — 렌더마다 C를 현재 테마로 갱신
   C = THEMES[settings.theme] || THEMES.dark;
 
-  // PIN 잠금
+  // PIN 잠금 — 실제 앱에서는 Keychain/Keystore로 PIN 영속 저장 필요
+  // 프로토타입에서는 새로고침 시 settings가 초기화되므로 pinLock도 초기화됨
   const [pinUnlocked, setPinUnlocked] = useState(!settings.pinLock);
   const [pinEntry, setPinEntry]       = useState("");
   useEffect(() => { if (!settings.pinLock) setPinUnlocked(true); }, [settings.pinLock]);
@@ -2526,11 +2612,11 @@ export default function MakeBlack() {
           <HomeScreen cats={cats} setCats={setCats} ruts={ruts} setRuts={setRuts} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} todosByDate={todosByDate} setTodosByDate={setTodosByDate} selectedDate={selectedDate} setSelectedDate={setSelectedDate} settings={settings} />
         </div>
       )}
-      {tab === "search"  && <SearchScreen myHandle={user.handle} friends={friends} onAddFriend={addFriend} onRemoveFriend={removeFriend} />}
-      {tab === "team"    && <TeamScreen myHandle={user.handle} myName={user.name} settings={settings} />}
-      {tab === "mypage"  && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} cats={cats} ruts={ruts} user={user} setUser={setUser} settings={settings} updSetting={updSetting} />}
+      {!showOnboarding && <div style={{ display: tab === "search" ? "block" : "none" }}><SearchScreen myHandle={user.handle} friends={friends} onAddFriend={addFriend} onRemoveFriend={removeFriend} /></div>}
+      {!showOnboarding && <div style={{ display: tab === "team" ? "block" : "none" }}><TeamScreen myHandle={user.handle} myName={user.name} settings={settings} friends={friends} /></div>}
+      {tab === "mypage"  && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} cats={cats} ruts={ruts} user={user} setUser={setUser} settings={settings} updSetting={updSetting} friends={friends} onTabChange={setTab} />}
       <BottomNav tab={tab} setTab={setTab} />
-      <style>{`:root { --bg: ${C.bg}; --text: ${C.text}; --dim: ${C.dim}; }`}</style>
+      <style>{`:root { --bg: ${C.bg}; --surface: ${C.surface}; --text: ${C.text}; --muted: ${C.muted}; --dim: ${C.dim}; --border: ${C.border}; }`}</style>
       <style>{`
         @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
         @keyframes blackIn { from { opacity: 0; transform: scale(1.04) } to { opacity: 1; transform: scale(1) } }
@@ -2549,7 +2635,7 @@ export default function MakeBlack() {
         @keyframes slideUp { from { transform: translateX(-50%) translateY(0) } to { transform: translateX(-50%) translateY(-108%) } }
         @keyframes pulse  { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(1.08)} }
         input::placeholder { color: var(--dim); }
-        select option { background: #111; }
+        select option { background: var(--bg); color: var(--text); }
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
         ::-webkit-scrollbar { width: 0; }
       `}</style>
