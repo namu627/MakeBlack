@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
 // ─────────────────────────────────────────────
 // Colour math
@@ -28,10 +28,17 @@ function rgbToHsl(r, g, b) {
 function mixRgbList(rgbList, totalCount = null) {
   if (!rgbList.length) return null;
   const n = rgbList.length;
-  const r = rgbList.reduce((a, c) => a + c[0], 0) / n;
-  const g = rgbList.reduce((a, c) => a + c[1], 0) / n;
-  const b = rgbList.reduce((a, c) => a + c[2], 0) / n;
-  const progress = totalCount ? n / totalCount : Math.min(1, (n - 1) * 0.13);
+  // 감산혼합: RGB → CMY로 변환 후 평균 → 다시 RGB
+  // 물감처럼 색을 섞을수록 어두워짐
+  const avgC = rgbList.reduce((a, c) => a + (1 - c[0] / 255), 0) / n;
+  const avgM = rgbList.reduce((a, c) => a + (1 - c[1] / 255), 0) / n;
+  const avgY = rgbList.reduce((a, c) => a + (1 - c[2] / 255), 0) / n;
+  const r = (1 - avgC) * 255;
+  const g = (1 - avgM) * 255;
+  const b = (1 - avgY) * 255;
+  // 진행률 기반 추가 다크닝 — 100% 완료 시 검정으로 수렴
+  const total = totalCount || n;
+  const progress = n / total;
   const darken = Math.max(0.02, 1 - Math.pow(progress, 0.7) * 0.98);
   return [r * darken, g * darken, b * darken];
 }
@@ -109,24 +116,44 @@ function drawInkOnWater(ctx, cx, cy, r, g, b, radius, seed, opacity = 1, canvasS
   ctx.putImageData(img, x0, y0);
 }
 
+// 팔레트 캔버스 캐시 — drop이 추가될 때만 증분 렌더링
+// key: canvas element → { dropCount, size }
+const _paletteCache = new WeakMap();
+
 function renderPalette(canvas, drops, totalCount, size = S) {
   const ctx = canvas.getContext("2d");
-  ctx.clearRect(0, 0, size, size);
-  ctx.fillStyle = "#0d0c0b";
-  ctx.fillRect(0, 0, size, size);
-  if (!drops.length) return;
-  for (let i = 0; i < drops.length; i++) {
-    const mixed = mixRgbList(drops.slice(0, i + 1).map(d => d.rgb), totalCount);
-    if (!mixed) continue;
-    const [r, g, b] = mixed;
-    const cx = drops[i].px * size, cy = drops[i].py * size;
-    const cornerDist = Math.sqrt(Math.max(cx, size - cx) ** 2 + Math.max(cy, size - cy) ** 2);
-    drawInkOnWater(ctx, cx, cy, r, g, b, cornerDist * 0.55, drops[i].seed * 0.001, 0.92, size);
+  const cached = _paletteCache.get(canvas);
+
+  // drops가 줄었거나(체크 해제) 사이즈 변경 시 전체 재렌더
+  const needFull = !cached || cached.size !== size || drops.length < cached.dropCount || cached.dropCount === 0;
+
+  if (needFull) {
+    ctx.clearRect(0, 0, size, size);
+    ctx.fillStyle = "#0d0c0b";
+    ctx.fillRect(0, 0, size, size);
+    for (let i = 0; i < drops.length; i++) {
+      const [r, g, b] = drops[i].rgb;
+      const cx = drops[i].px * size, cy = drops[i].py * size;
+      const cornerDist = Math.sqrt(Math.max(cx, size - cx) ** 2 + Math.max(cy, size - cy) ** 2);
+      drawInkOnWater(ctx, cx, cy, r, g, b, cornerDist * 0.55, drops[i].seed * 0.001, 0.92, size);
+    }
+  } else if (drops.length > cached.dropCount) {
+    // 새 drop만 증분으로 그리기
+    for (let i = cached.dropCount; i < drops.length; i++) {
+      const [r, g, b] = drops[i].rgb;
+      const cx = drops[i].px * size, cy = drops[i].py * size;
+      const cornerDist = Math.sqrt(Math.max(cx, size - cx) ** 2 + Math.max(cy, size - cy) ** 2);
+      drawInkOnWater(ctx, cx, cy, r, g, b, cornerDist * 0.55, drops[i].seed * 0.001, 0.92, size);
+    }
   }
+
+  // BLACK 오버레이
   if (totalCount && drops.length >= totalCount) {
     ctx.fillStyle = "rgba(0,0,0,0.82)";
     ctx.fillRect(0, 0, size, size);
   }
+
+  _paletteCache.set(canvas, { dropCount: drops.length, size });
 }
 
 // Tiny palette dot for calendar cell
@@ -175,11 +202,7 @@ function PaletteCanvas({ drops, version, totalCount, animDrop, onAnimDone }) {
     <div style={{ position: "relative", width: "100%", aspectRatio: "1" }}>
       <canvas ref={staticRef} width={S} height={S} style={{ width: "100%", height: "100%", borderRadius: 14, display: "block" }} />
       <canvas ref={animRef}   width={S} height={S} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", borderRadius: 14, pointerEvents: "none" }} />
-      {drops.length === 0 && (
-        <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "#2a2a2a", pointerEvents: "none" }}>
-          완료하면 색이 퍼집니다
-        </div>
-      )}
+
     </div>
   );
 }
@@ -319,7 +342,13 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
     setCategories(c => [...c, { id: uid(), name: newCatName.trim(), color: newCatColor }]);
     setNewCatName("");
   };
-  const delCat = id => { setCategories(c => c.filter(x => x.id !== id)); setRoutines(r => r.filter(x => x.catId !== id)); };
+  const [confirmDelCat, setConfirmDelCat] = useState(null); // catId to delete
+  const delCat = (id) => setConfirmDelCat(id);
+  const confirmDelete = () => {
+    setCategories(c => c.filter(x => x.id !== confirmDelCat));
+    setRoutines(r => r.filter(x => x.catId !== confirmDelCat));
+    setConfirmDelCat(null);
+  };
   const saveRoutine = () => {
     if (!routineForm?.name?.trim()) return;
     if (routineForm.id) setRoutines(r => r.map(x => x.id === routineForm.id ? routineForm : x));
@@ -361,6 +390,16 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
         </div>
         {/* list with drag-to-reorder */}
         {categories.length === 0 && <div style={{ textAlign: "center", color: C.dim, fontSize: 13, padding: "20px 0" }}>아직 카테고리가 없어요</div>}
+        {/* 삭제 확인 */}
+        {confirmDelCat && (
+          <div style={{ background: "#1e1010", border: "1px solid #3a1a1a", borderRadius: radius.md, padding: "14px", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, color: "#ff7070", marginBottom: 12 }}>이 카테고리와 관련된 루틴도 모두 삭제돼요. 계속할까요?</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => setConfirmDelCat(null)} style={{ flex: 1, padding: "9px", background: "transparent", border: `1px solid ${C.border2}`, borderRadius: radius.sm, color: C.muted, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>취소</button>
+              <button onClick={confirmDelete} style={{ flex: 1, padding: "9px", background: "#ff4444", border: "none", borderRadius: radius.sm, color: "#fff", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", fontSize: 12 }}>삭제</button>
+            </div>
+          </div>
+        )}
         {categories.map((cat, idx) => (
           <div key={cat.id}
             draggable
@@ -388,7 +427,7 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
       </>)}
 
       {tab === "routines" && (<>
-        <button onClick={() => setRoutineForm({ catId: categories[0]?.id, name: "", days: [], dates: [] })} style={{
+        <button onClick={() => setRoutineForm({ catId: categories[0]?.id, name: "", repeatType: "days", days: [], monthDays: [], startDate: getTodayKey(), endDate: "", dates: [] })} style={{
           width: "100%", padding: "12px", background: C.surface,
           border: `1px dashed ${C.border2}`, borderRadius: radius.md,
           color: C.muted, cursor: "pointer", fontSize: 13,
@@ -397,25 +436,24 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
 
         {routines.map(r => {
           const cat = categories.find(c => c.id === r.catId);
+          const repeatLabel = r.repeatType === "monthly"
+            ? `매월 ${(r.monthDays||[]).join(", ")}일`
+            : (r.days||[]).map(d => ["일","월","화","수","목","금","토"][d]).join(", ");
           return (
             <div key={r.id} style={{ padding: "13px 14px", marginBottom: 8, background: C.card, borderRadius: radius.md, border: `1px solid ${C.border}` }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                 <div style={{ width: 7, height: 7, borderRadius: "50%", background: cat?.color ?? "#888" }} />
                 <span style={{ fontSize: 11, color: C.muted }}>{cat?.name}</span>
                 <span style={{ flex: 1, fontSize: 14, color: C.text }}>{r.name}</span>
-                <button onClick={() => setRoutineForm({...r})} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>편집</button>
+                <button onClick={() => setRoutineForm({...r, repeatType: r.repeatType||"days", monthDays: r.monthDays||[], startDate: r.startDate||getTodayKey(), endDate: r.endDate||""})} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>편집</button>
                 <button onClick={() => setRoutines(rs => rs.filter(x => x.id !== r.id))} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 14, lineHeight: 1 }}>✕</button>
               </div>
-              <div style={{ display: "flex", gap: 4 }}>
-                {["일","월","화","수","목","금","토"].map((d,i) => (
-                  <div key={i} style={{
-                    width: 24, height: 24, borderRadius: "50%",
-                    background: r.days.includes(i) ? "#ede8e2" : C.surface,
-                    display: "flex", alignItems: "center", justifyContent: "center",
-                    fontSize: 10, color: r.days.includes(i) ? "#080808" : C.dim,
-                  }}>{d}</div>
-                ))}
-              </div>
+              <div style={{ fontSize: 11, color: C.dim }}>{repeatLabel || "반복 없음"}</div>
+              {(r.startDate || r.endDate) && (
+                <div style={{ fontSize: 10, color: C.dim, marginTop: 3 }}>
+                  {r.startDate} ~ {r.endDate || "종료일 없음"}
+                </div>
+              )}
             </div>
           );
         })}
@@ -423,24 +461,80 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
         {routineForm && (
           <div style={{ marginTop: 16, background: C.surface, borderRadius: radius.lg, padding: 16, border: `1px solid ${C.border2}` }}>
             <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>루틴 {routineForm.id ? "편집" : "추가"}</div>
+
+            {/* 카테고리 */}
             <select value={routineForm.catId} onChange={e => setRoutineForm(f => ({...f, catId: Number(e.target.value)}))}
               style={{ width: "100%", background: C.card, border: `1px solid ${C.border2}`, borderRadius: radius.sm, padding: "10px 12px", color: C.text, fontSize: 13, marginBottom: 10, outline: "none", fontFamily: "inherit" }}>
               {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
+
+            {/* 루틴 이름 */}
             <input value={routineForm.name} onChange={e => setRoutineForm(f => ({...f, name: e.target.value}))}
               placeholder="루틴 이름" style={{ width: "100%", boxSizing: "border-box", background: C.card, border: `1px solid ${C.border2}`, borderRadius: radius.sm, padding: "10px 12px", color: C.text, fontSize: 13, marginBottom: 12, outline: "none", fontFamily: "inherit" }} />
-            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>반복 요일</div>
-            <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
-              {["일","월","화","수","목","금","토"].map((d,i) => (
-                <div key={i} onClick={() => toggleDay(i)} style={{
-                  flex: 1, height: 34, borderRadius: radius.sm,
-                  background: routineForm.days.includes(i) ? C.text : C.card,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 12, color: routineForm.days.includes(i) ? "#080808" : C.dim,
-                  cursor: "pointer", transition: "all 0.15s",
-                }}>{d}</div>
+
+            {/* 반복 타입 탭 */}
+            <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+              {[["days","요일 반복"],["monthly","날짜 반복"]].map(([k,l]) => (
+                <button key={k} onClick={() => setRoutineForm(f => ({...f, repeatType: k}))} style={{
+                  flex: 1, padding: "8px 0", borderRadius: radius.sm, cursor: "pointer", fontSize: 12, fontFamily: "inherit",
+                  background: routineForm.repeatType === k ? C.text : C.card,
+                  color: routineForm.repeatType === k ? "#080808" : C.dim,
+                  border: `1px solid ${routineForm.repeatType === k ? C.text : C.border2}`,
+                  transition: "all 0.15s",
+                }}>{l}</button>
               ))}
             </div>
+
+            {/* 요일 반복 */}
+            {routineForm.repeatType === "days" && (
+              <>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>반복 요일</div>
+                <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+                  {["일","월","화","수","목","금","토"].map((d,i) => (
+                    <div key={i} onClick={() => setRoutineForm(f => ({ ...f, days: f.days.includes(i) ? f.days.filter(x=>x!==i) : [...f.days,i] }))} style={{
+                      flex: 1, height: 34, borderRadius: radius.sm, cursor: "pointer", transition: "all 0.15s",
+                      background: routineForm.days.includes(i) ? C.text : C.card,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 12, color: routineForm.days.includes(i) ? "#080808" : C.dim,
+                    }}>{d}</div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* 날짜 반복 (매월 N일) */}
+            {routineForm.repeatType === "monthly" && (
+              <>
+                <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>매월 반복할 날짜 (복수 선택 가능)</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 14 }}>
+                  {Array.from({length: 31}, (_,i) => i+1).map(d => (
+                    <div key={d} onClick={() => setRoutineForm(f => ({ ...f, monthDays: (f.monthDays||[]).includes(d) ? f.monthDays.filter(x=>x!==d) : [...(f.monthDays||[]),d] }))} style={{
+                      width: 32, height: 32, borderRadius: radius.sm, cursor: "pointer", transition: "all 0.15s",
+                      background: (routineForm.monthDays||[]).includes(d) ? C.text : C.card,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 12, color: (routineForm.monthDays||[]).includes(d) ? "#080808" : C.dim,
+                      border: `1px solid ${C.border}`,
+                    }}>{d}</div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {/* 시작일 / 종료일 */}
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>기간</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 10, color: C.dim, marginBottom: 4 }}>시작일</div>
+                <input type="date" value={routineForm.startDate||""} onChange={e => setRoutineForm(f => ({...f, startDate: e.target.value}))}
+                  style={{ width: "100%", boxSizing: "border-box", background: C.card, border: `1px solid ${C.border2}`, borderRadius: radius.sm, padding: "9px 10px", color: C.text, fontSize: 12, outline: "none", fontFamily: "inherit", colorScheme: "dark" }} />
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 10, color: C.dim, marginBottom: 4 }}>종료일</div>
+                <input type="date" value={routineForm.endDate||""} onChange={e => setRoutineForm(f => ({...f, endDate: e.target.value}))}
+                  style={{ width: "100%", boxSizing: "border-box", background: C.card, border: `1px solid ${C.border2}`, borderRadius: radius.sm, padding: "9px 10px", color: C.text, fontSize: 12, outline: "none", fontFamily: "inherit", colorScheme: "dark" }} />
+              </div>
+            </div>
+
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => setRoutineForm(null)} style={{ flex: 1, padding: "11px", background: "transparent", border: `1px solid ${C.border2}`, borderRadius: radius.md, color: C.muted, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}>취소</button>
               <button onClick={saveRoutine} style={{ flex: 1, padding: "11px", background: C.text, border: "none", borderRadius: radius.md, color: "#080808", cursor: "pointer", fontWeight: 700, fontFamily: "inherit", fontSize: 13 }}>저장</button>
@@ -542,7 +636,7 @@ function FlyingOrb({ sx, sy, tx, ty, drops, totalCount }) {
 // ─────────────────────────────────────────────
 // Home Screen
 // ─────────────────────────────────────────────
-function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, todosByDate, setTodosByDate }) {
+function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHistory, todosByDate, setTodosByDate, selectedDate, setSelectedDate }) {
   // Dynamic today — refreshes at midnight
   const [todayKey, setTodayKey]         = useState(getTodayKey);
   useEffect(() => {
@@ -552,9 +646,6 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
   }, [todayKey]);
 
   const [showCatMgr,   setShowCatMgr]   = useState(false);
-  const [cats, setCats]   = useState(categories);
-  const [ruts, setRuts]   = useState(routines);
-  const [selectedDate, setSelectedDate] = useState(getTodayKey);
   const [viewMonth, setViewMonth]       = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
   const [addingTo, setAddingTo]         = useState(null);
   const [newTodoText, setNewTodoText]   = useState("");
@@ -564,6 +655,14 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
   const [canvasVer, setCanvasVer]       = useState(0);
   const [blackPhase, setBlackPhase]     = useState(null); // null | "in" | "out"
   const [usedHues, setUsedHues]         = useState([]);
+  // selectedDate 바뀌면 usedHues 초기화 (날짜별 독립 색상 관리)
+  const prevDateRef = useRef(selectedDate);
+  useEffect(() => {
+    if (prevDateRef.current !== selectedDate) {
+      prevDateRef.current = selectedDate;
+      setUsedHues([]);
+    }
+  }, [selectedDate]);
   const [showCal, setShowCal]           = useState(false);
   const [calClosing, setCalClosing]     = useState(false);
   const [flyOrb, setFlyOrb]             = useState(null);
@@ -580,13 +679,26 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
     const result = {};
     cats.forEach(cat => { result[cat.id] = [...(base[cat.id] || [])]; });
     ruts.forEach(rut => {
-      const dow = new Date(dk + "T00:00:00").getDay();
-      if (!rut.days.includes(dow) && !rut.dates.includes(dk)) return;
+      // 시작일 / 종료일 범위 체크
+      if (rut.startDate && dk < rut.startDate) return;
+      if (rut.endDate   && dk > rut.endDate)   return;
+
+      const dt  = new Date(dk + "T00:00:00");
+      const dow = dt.getDay();
+      const dayOfMonth = dt.getDate();
+      const repeatType = rut.repeatType || "days";
+
+      let applies = false;
+      if (repeatType === "days")    applies = (rut.days||[]).includes(dow);
+      if (repeatType === "monthly") applies = (rut.monthDays||[]).includes(dayOfMonth);
+      // 하위호환: 기존 dates 배열
+      if (!applies && (rut.dates||[]).includes(dk)) applies = true;
+      if (!applies) return;
+
       const catTodos = result[rut.catId] || [];
       const routineTodoId = `r${rut.id}-${dk}`;
       const existing = catTodos.find(t => t.id === routineTodoId);
       if (!existing) {
-        // 저장된 완료 상태 복원 (날짜별로 독립적으로 저장됨)
         const saved = (todosByDate[dk]?.[rut.catId] || []).find(t => t.id === routineTodoId);
         result[rut.catId] = [{
           id: routineTodoId, text: rut.name,
@@ -600,6 +712,19 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
 
   const selTodos   = getDateTodos(selectedDate);
   const allTodos   = Object.values(selTodos).flat();
+
+  // 캘린더용 월별 todo 캐시 — getDateTodos를 31번 호출하는 대신 한 번에 계산
+  const calMonthTodoCache = useMemo(() => {
+    const cache = {};
+    const y = viewMonth.y, m = viewMonth.m;
+    const days = new Date(y, m + 1, 0).getDate();
+    for (let d = 1; d <= days; d++) {
+      const dk = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const todos = Object.values(getDateTodos(dk)).flat();
+      cache[dk] = { hasTodos: todos.length > 0, hasIncomplete: todos.some(t => !t.done) };
+    }
+    return cache;
+  }, [viewMonth, todosByDate, cats, ruts]);
   const doneCount  = allTodos.filter(t => t.done).length;
   const totalCount = allTodos.length;
   const progress   = totalCount > 0 ? Math.round(doneCount / totalCount * 100) : 0;
@@ -851,10 +976,28 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
                 const isTod = dk === todayKey;
                 const hist  = paletteHistory[dk];
                 const dow   = new Date(dk + "T00:00:00").getDay();
-                const prog  = hist?.total > 0 ? (hist.drops?.length||0) / hist.total : 0;
-                const isDone = prog >= 1 && hist?.total > 0;
+                const isDone = hist?.total > 0 && (hist.drops?.length||0) >= hist.total;
+                // 캐시에서 할일 상태 읽기
+                const cachedDay = calMonthTodoCache[dk] || { hasTodos: false, hasIncomplete: false };
+                const hasTodos      = cachedDay.hasTodos;
+                const hasIncomplete = cachedDay.hasIncomplete;
+                // 날짜 숫자 색상: 요일색 우선 → 미완료=흰색, 완료=흐림, 없음=어두운회색
+                const numColor = dow === 0 ? "#ff7070"
+                  : dow === 6 ? "#7090ff"
+                  : hasIncomplete ? C.text        // 미완료 → 흰색 (눈에 띔)
+                  : isDone       ? "#444"          // 완료 → 흐림
+                  : isSel        ? C.text
+                  : "#3a3a3a";                     // 할일 없음 → 어두운 회색
                 return (
-                  <div key={day} ref={isSel ? targetCellRef : null} onClick={() => { setSelectedDate(dk); closeCalendar(); }} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "pointer", padding: "3px 1px", borderRadius: radius.sm, background: isSel ? "#222" : "transparent", transition: "background 0.15s" }}>
+                  <div key={day} ref={isSel ? targetCellRef : null} onClick={() => { setSelectedDate(dk); closeCalendar(); }} style={{
+                    display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "pointer", padding: "3px 1px",
+                    borderRadius: radius.sm,
+                    background: isSel ? "#222" : "transparent",
+                    outline: hasIncomplete ? "1px solid rgba(255,255,255,0.18)"
+                           : isDone       ? "1px solid rgba(255,255,255,0.06)"
+                           : "none",
+                    transition: "background 0.15s",
+                  }}>
                     <div style={{ position: "relative", width: 30, height: 30,
                       animation: stampDate === dk ? "stamp 0.55s cubic-bezier(0.36,0.07,0.19,0.97) both" : "none" }}>
                       {/* Ripple ring on stamp */}
@@ -862,13 +1005,10 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
                         <div style={{ position: "absolute", inset: -4, borderRadius: "50%", border: "1.5px solid rgba(255,255,255,0.6)", animation: "ripple 0.7s 0.15s ease-out forwards", pointerEvents: "none" }} />
                       )}
                       {hist?.drops?.length > 0
-                        ? <>
+                        ? <div style={{ opacity: isDone ? 1 : 0.35 + (hist.drops.length / (hist.total || hist.drops.length)) * 0.65 }}>
                             <CalendarPalette drops={hist.drops} totalCount={hist.total} size={30} />
-                            <div style={{ position: "absolute", inset: 0, borderRadius: "50%",
-                              background: isDone ? "rgba(0,0,0,0.45)" : `rgba(0,0,0,${0.5 - prog*0.5})`,
-                              border: isDone ? "1.5px solid rgba(255,255,255,0.5)" : "none",
-                              pointerEvents: "none" }} />
-                          </>
+                            {isDone && <div style={{ position: "absolute", inset: 0, borderRadius: "50%", border: "1.5px solid rgba(255,255,255,0.5)", pointerEvents: "none" }} />}
+                          </div>
                         : <div style={{ width: 30, height: 30, borderRadius: "50%",
                             background: isTod ? "#1a1a1a" : "transparent",
                             border: isTod ? `1px solid ${C.border2}` : isSel ? `1px solid #444` : "none",
@@ -877,7 +1017,7 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
                           </div>
                       }
                     </div>
-                    <span style={{ fontSize: 9, color: dow===0?"#ff7070":dow===6?"#7090ff":isSel?C.text:"#3a3a3a", fontWeight: isTod?700:400 }}>{day}</span>
+                    <span style={{ fontSize: 9, color: numColor, fontWeight: isTod ? 700 : hasIncomplete ? 600 : 400 }}>{day}</span>
                   </div>
                 );
               })}
@@ -890,23 +1030,18 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
       <div style={{ flexShrink: 0, padding: "14px 18px 0" }}>
         {/* 헤더 */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-          {/* 날짜 + 이전/다음 화살표 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <button onClick={() => goDay(-1)} style={{ width: 26, height: 26, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>‹</button>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase" }}>makeblack</div>
-              <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em", color: C.text, marginTop: 1, whiteSpace: "nowrap" }}>
+          {/* 날짜 + 이전/다음 — 슬림한 텍스트 버튼 */}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+            <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase", marginBottom: 2 }}>makeblack</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+              <button onClick={() => goDay(-1)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 9, lineHeight: 1, padding: 0, width: 13, opacity: 0.55, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>◀</button>
+              <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.02em", color: C.text, whiteSpace: "nowrap", width: 88, textAlign: "center" }}>
                 {isToday ? "오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" })}
-                <span style={{ fontSize: 10, color: C.dim, marginLeft: 5, fontWeight: 400 }}>{calYear}.{String(calMonth+1).padStart(2,"0")}</span>
               </div>
+              <button onClick={() => goDay(1)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 9, lineHeight: 1, padding: 0, width: 13, opacity: 0.55, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>▶</button>
             </div>
-            <button onClick={() => goDay(1)} style={{ width: 26, height: 26, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>›</button>
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            {/* 진행률 pill */}
-            <div style={{ padding: "5px 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, fontSize: 11, fontWeight: 600, color: isBlack ? "#aaa" : mixedCss || C.dim, letterSpacing: "-0.01em" }}>
-              {isBlack ? "●" : totalCount > 0 ? `${progress}%` : "—"}
-            </div>
             <button onClick={() => setShowCal(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>캘린더</button>
             <button onClick={sharePalette} disabled={drops.length === 0} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: drops.length > 0 ? C.muted : C.dim, cursor: drops.length > 0 ? "pointer" : "default", fontSize: 11, fontFamily: "inherit", opacity: drops.length > 0 ? 1 : 0.4 }}>공유</button>
             <button onClick={() => setShowCatMgr(true)} style={{ height: 28, padding: "0 11px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>카테고리</button>
@@ -916,11 +1051,7 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
         {/* 팔레트 캔버스 */}
         <div ref={paletteAreaRef} style={{ width: "min(52vw, 200px)", aspectRatio: "1", borderRadius: radius.lg, overflow: "hidden", border: `1px solid ${C.border}`, position: "relative", margin: "0 auto" }}>
           <PaletteCanvas drops={drops} version={canvasVer} totalCount={totalCount} animDrop={animDrop} onAnimDone={() => setAnimDrop(null)} />
-          {drops.length === 0 && (
-            <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
-              <div style={{ fontSize: 11, color: "#1e1e1e", letterSpacing: "0.12em" }}>완료하면 색이 피어나요</div>
-            </div>
-          )}
+
         </div>
 
         {/* 그라데이션 프로그레스바 */}
@@ -938,9 +1069,12 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
           </div>
           {/* 색 도트 + 완료 카운트 */}
           <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 6, minHeight: 14 }}>
-            {drops.map(d => (
+            {drops.slice(0, 10).map(d => (
               <div key={d.id} style={{ width: 8, height: 8, borderRadius: "50%", background: d.color, boxShadow: `0 0 4px ${d.color}66`, flexShrink: 0 }} />
             ))}
+            {drops.length > 10 && (
+              <span style={{ fontSize: 9, color: C.dim, flexShrink: 0 }}>+{drops.length - 10}</span>
+            )}
             {totalCount > 0 && (
               <span style={{ fontSize: 10, color: C.dim, marginLeft: "auto" }}>{doneCount} / {totalCount}</span>
             )}
@@ -1037,21 +1171,45 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory, t
 // ─────────────────────────────────────────────
 // MyPage — 통계 화면
 // ─────────────────────────────────────────────
-function MyPageScreen({ paletteHistory, todosByDate, categories }) {
+function MyPageScreen({ paletteHistory, todosByDate, cats, ruts }) {
   const now   = new Date();
   const year  = now.getFullYear();
   const month = now.getMonth();
   const daysInMonth = new Date(year, month + 1, 0).getDate();
 
   // 이번 달 데이터 집계
+  // 루틴 포함 할일 계산
+  const getMyPageTodos = (dk) => {
+    const base = todosByDate[dk] || {};
+    const result = {};
+    cats.forEach(cat => { result[cat.id] = [...(base[cat.id] || [])]; });
+    ruts.forEach(rut => {
+      if (rut.startDate && dk < rut.startDate) return;
+      if (rut.endDate   && dk > rut.endDate)   return;
+      const dt = new Date(dk + "T00:00:00");
+      const repeatType = rut.repeatType || "days";
+      let applies = false;
+      if (repeatType === "days")    applies = (rut.days||[]).includes(dt.getDay());
+      if (repeatType === "monthly") applies = (rut.monthDays||[]).includes(dt.getDate());
+      if (!applies && (rut.dates||[]).includes(dk)) applies = true;
+      if (!applies) return;
+      const rid = `r${rut.id}-${dk}`;
+      const catTodos = result[rut.catId] || [];
+      if (!catTodos.some(t => t.id === rid)) {
+        const saved = (todosByDate[dk]?.[rut.catId] || []).find(t => t.id === rid);
+        result[rut.catId] = [{ id: rid, done: saved?.done ?? false }, ...catTodos];
+      }
+    });
+    return Object.values(result).flat();
+  };
+
   const monthStats = Array.from({ length: daysInMonth }, (_, i) => {
-    const dk = `${year}-${String(month+1).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`;
-    const hist   = paletteHistory[dk];
-    const byDate = todosByDate[dk] || {};
-    const allT   = Object.values(byDate).flat();
-    const done   = allT.filter(t => t.done).length;
-    const total  = hist?.total || allT.length;
-    const prog   = total > 0 ? done / total : 0;
+    const dk   = `${year}-${String(month+1).padStart(2,'0')}-${String(i+1).padStart(2,'0')}`;
+    const hist = paletteHistory[dk];
+    const allT = getMyPageTodos(dk);
+    const done  = allT.filter(t => t.done).length;
+    const total = hist?.total || allT.length;
+    const prog  = total > 0 ? done / total : 0;
     return { dk, day: i+1, prog, done, total, drops: hist?.drops || [], isBlack: prog >= 1 && total > 0 };
   });
 
@@ -1221,18 +1379,24 @@ function BottomNav({ tab, setTab }) {
 export default function MakeBlack() {
   const [tab, setTab]                       = useState("home");
   const [showOnboarding, setShowOnboarding] = useState(true);
-  const [categories]                        = useState(DEFAULT_CATEGORIES);
-  const [routines]                          = useState(DEFAULT_ROUTINES);
+  // ── 전역 상태 (탭 전환해도 유지) ──
+  const [cats, setCats]                     = useState(DEFAULT_CATEGORIES);
+  const [ruts, setRuts]                     = useState(DEFAULT_ROUTINES);
   const [paletteHistory, setPaletteHistory] = useState({});
   const [todosByDate, setTodosByDate]       = useState({});
+  const [selectedDate, setSelectedDate]     = useState(getTodayKey);
 
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", position: "relative", minHeight: "100vh", background: C.bg }}>
       {showOnboarding && <OnboardingOverlay onDone={() => { setShowOnboarding(false); }} />}
-      {!showOnboarding && tab === "home"    && <HomeScreen categories={categories} routines={routines} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} todosByDate={todosByDate} setTodosByDate={setTodosByDate} />}
+      {!showOnboarding && (
+        <div style={{ display: tab === "home" ? "block" : "none" }}>
+          <HomeScreen cats={cats} setCats={setCats} ruts={ruts} setRuts={setRuts} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} todosByDate={todosByDate} setTodosByDate={setTodosByDate} selectedDate={selectedDate} setSelectedDate={setSelectedDate} />
+        </div>
+      )}
       {tab === "search"  && <PlaceholderScreen label="검색" icon="◎" />}
       {tab === "friends" && <PlaceholderScreen label="친구" icon="◈" />}
-      {tab === "mypage"  && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} categories={categories} />}
+      {tab === "mypage"  && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} cats={cats} ruts={ruts} />}
       <BottomNav tab={tab} setTab={setTab} />
       <style>{`
         @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
