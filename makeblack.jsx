@@ -421,7 +421,6 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
 // Home Screen
 // ─────────────────────────────────────────────
 function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory }) {
-  const [calCollapsed, setCalCollapsed] = useState(false);
   const [showCatMgr,   setShowCatMgr]   = useState(false);
   const [cats, setCats]   = useState(categories);
   const [ruts, setRuts]   = useState(routines);
@@ -434,6 +433,8 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
   const [canvasVer, setCanvasVer]       = useState(0);
   const [blackDone, setBlackDone]       = useState(false);
   const [usedHues, setUsedHues]         = useState([]);
+  const [homeTab, setHomeTab]           = useState("palette"); // "palette" | "todos"
+  const [showCal, setShowCal]           = useState(false);
   const inputRef = useRef(null);
 
   const selDateObj = new Date(selectedDate + "T00:00:00");
@@ -534,220 +535,195 @@ function HomeScreen({ categories, routines, paletteHistory, setPaletteHistory })
   const isToday  = selectedDate === todayKey;
 
   return (
-    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", paddingBottom: 90 }}>
+    <div style={{ height: "100dvh", background: C.bg, color: C.text, fontFamily: "-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", display: "flex", flexDirection: "column", overflow: "hidden" }}>
 
-      {/* BLACK overlay */}
+      {/* ── BLACK overlay ── */}
       {blackDone && (
-        <div onClick={() => setBlackDone(false)} style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.96)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", animation: "fadeIn 1.2s ease", cursor: "pointer" }}>
-          <div style={{ fontSize: 80, lineHeight: 1, animation: "pulse 2.8s ease-in-out infinite" }}>●</div>
-          <div style={{ fontSize: 26, letterSpacing: "0.5em", color: "#fff", fontWeight: 200, marginTop: 24 }}>BLACK</div>
-          <div style={{ fontSize: 11, color: "#333", marginTop: 12, letterSpacing: "0.15em" }}>모든 색이 하나가 됐어요</div>
-          <div style={{ fontSize: 10, color: "#1e1e1e", marginTop: 52 }}>tap to close</div>
+        <div onClick={() => setBlackDone(false)} style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(0,0,0,0.97)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", animation: "fadeIn 1.2s ease", cursor: "pointer" }}>
+          <div style={{ fontSize: 88, lineHeight: 1, animation: "pulse 2.8s ease-in-out infinite" }}>●</div>
+          <div style={{ fontSize: 28, letterSpacing: "0.55em", color: "#fff", fontWeight: 200, marginTop: 28 }}>BLACK</div>
+          <div style={{ fontSize: 12, color: "#383838", marginTop: 14, letterSpacing: "0.12em" }}>모든 색이 하나가 됐어요</div>
+          <div style={{ fontSize: 10, color: "#1c1c1c", marginTop: 56 }}>tap to close</div>
         </div>
       )}
 
-      {/* ── Header ── */}
-      <div style={{ padding: "20px 20px 0", display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
-        <div>
-          <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.3em", marginBottom: 2, textTransform: "uppercase" }}>makeblack</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 2 }}>
-            <button onClick={() => goMonth(-1)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16, padding: "0 2px", lineHeight: 1, fontFamily: "inherit" }}>‹</button>
-            <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.03em" }}>{calYear}년 {monthName}</div>
-            <button onClick={() => goMonth(1)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 16, padding: "0 2px", lineHeight: 1, fontFamily: "inherit" }}>›</button>
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 6, paddingBottom: 4 }}>
-          <button onClick={() => setCalCollapsed(c => !c)} style={{
-            width: 32, height: 32, borderRadius: "50%",
-            background: C.surface, border: `1px solid ${C.border}`,
-            color: C.muted, cursor: "pointer", fontSize: 14,
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}>{calCollapsed ? "▾" : "▴"}</button>
-          <button onClick={() => setShowCatMgr(true)} style={{
-            height: 32, padding: "0 14px", borderRadius: radius.full,
-            background: C.surface, border: `1px solid ${C.border}`,
-            color: C.muted, cursor: "pointer", fontSize: 12, fontFamily: "inherit",
-            display: "flex", alignItems: "center", gap: 4,
-          }}>✦ 카테고리</button>
-        </div>
-      </div>
-
-      {/* ── Calendar ── */}
-      {!calCollapsed && (
-        <div style={{ padding: "16px 16px 0" }}>
-          {/* Weekday headers */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", marginBottom: 4 }}>
-            {["일","월","화","수","목","금","토"].map((d,i) => (
-              <div key={d} style={{ textAlign: "center", fontSize: 10, color: i===0 ? "#ff7070" : i===6 ? "#7090ff" : C.dim, padding: "2px 0" }}>{d}</div>
-            ))}
-          </div>
-          {/* Day cells */}
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2 }}>
-            {Array.from({ length: firstDow }).map((_,i) => <div key={`e${i}`} />)}
-            {Array.from({ length: daysInMonth }, (_,i) => i+1).map(day => {
-              const dk    = `${calYear}-${String(calMonth+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-              const isSel = dk === selectedDate;
-              const isTod = dk === todayKey;
-              const hist  = paletteHistory[dk];
-              const dow   = new Date(dk + "T00:00:00").getDay();
-              // Progress-based brightness: 0%=transparent, 100%=white ring
-              const prog  = hist?.total > 0 ? (hist.drops?.length || 0) / hist.total : 0;
-              const isDone = prog >= 1 && hist?.total > 0;
-              // Cell glow: subtle white bg scaling with progress
-              const cellBg = prog > 0
-                ? `rgba(255,255,255,${0.03 + prog * 0.09})`
-                : isSel ? "#1c1c1c" : "transparent";
-              return (
-                <div key={day} onClick={() => setSelectedDate(dk)} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1, cursor: "pointer", padding: "3px 1px", borderRadius: radius.sm, background: isSel ? "#1e1e1e" : "transparent", transition: "background 0.15s", position: "relative" }}>
-                  {hist?.drops?.length > 0
-                    ? (
-                      <div style={{ position: "relative", width: 32, height: 32 }}>
-                        <CalendarPalette drops={hist.drops} totalCount={hist.total} size={32} />
-                        {/* brightness overlay fades as progress grows — at 100% goes near-black with white ring */}
-                        <div style={{ position: "absolute", inset: 0, borderRadius: "50%",
-                          background: isDone ? "rgba(0,0,0,0.55)" : `rgba(0,0,0,${0.5 - prog * 0.5})`,
-                          border: isDone ? "1.5px solid rgba(255,255,255,0.55)" : "none",
-                          transition: "all 0.4s",
-                          pointerEvents: "none",
-                        }} />
-                      </div>
-                    )
-                    : (
-                      <div style={{ width: 32, height: 32, borderRadius: "50%",
-                        background: prog > 0 ? cellBg : isTod ? "#1a1a1a" : "transparent",
-                        border: isTod ? `1px solid ${C.border2}` : "none",
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                      }}>
-                        {isTod && prog === 0 && <div style={{ width: 4, height: 4, borderRadius: "50%", background: C.dim }} />}
-                      </div>
-                    )
-                  }
-                  <span style={{ fontSize: 9,
-                    color: dow===0 ? "#ff7070" : dow===6 ? "#7090ff" : isSel ? C.text : isDone ? "#888" : "#383838",
-                    fontWeight: isTod ? 700 : 400,
-                  }}>{day}</span>
-                </div>
-              );
-            })}
+      {/* ── Calendar sheet ── */}
+      {showCal && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 150, background: "rgba(0,0,0,0.65)", backdropFilter: "blur(10px)" }} onClick={() => setShowCal(false)}>
+          <div onClick={e => e.stopPropagation()} style={{ position: "absolute", top: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#111", borderRadius: "0 0 28px 28px", padding: "20px 18px 28px", animation: "slideDown 0.22s ease" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+              <button onClick={() => goMonth(-1)} style={{ width: 34, height: 34, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 18, fontFamily: "inherit" }}>‹</button>
+              <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: "-0.02em" }}>{calYear}년 {monthName}</span>
+              <button onClick={() => goMonth(1)} style={{ width: 34, height: 34, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 18, fontFamily: "inherit" }}>›</button>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", marginBottom: 6 }}>
+              {["일","월","화","수","목","금","토"].map((d,i) => (
+                <div key={d} style={{ textAlign: "center", fontSize: 10, color: i===0?"#ff7070":i===6?"#7090ff":C.dim }}>{d}</div>
+              ))}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 3 }}>
+              {Array.from({ length: firstDow }).map((_,i) => <div key={`e${i}`} />)}
+              {Array.from({ length: daysInMonth }, (_,i) => i+1).map(day => {
+                const dk    = `${calYear}-${String(calMonth+1).padStart(2,"0")}-${String(day).padStart(2,"0")}`;
+                const isSel = dk === selectedDate;
+                const isTod = dk === todayKey;
+                const hist  = paletteHistory[dk];
+                const dow   = new Date(dk + "T00:00:00").getDay();
+                const prog  = hist?.total > 0 ? (hist.drops?.length||0) / hist.total : 0;
+                const isDone = prog >= 1 && hist?.total > 0;
+                return (
+                  <div key={day} onClick={() => { setSelectedDate(dk); setShowCal(false); }} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 2, cursor: "pointer", padding: "3px 1px", borderRadius: radius.sm, background: isSel ? "#222" : "transparent", transition: "background 0.15s" }}>
+                    <div style={{ position: "relative", width: 30, height: 30 }}>
+                      {hist?.drops?.length > 0
+                        ? <>
+                            <CalendarPalette drops={hist.drops} totalCount={hist.total} size={30} />
+                            <div style={{ position: "absolute", inset: 0, borderRadius: "50%", background: isDone ? "rgba(0,0,0,0.45)" : `rgba(0,0,0,${0.5-prog*0.5})`, border: isDone ? "1.5px solid rgba(255,255,255,0.5)" : "none", pointerEvents: "none" }} />
+                          </>
+                        : <div style={{ width: 30, height: 30, borderRadius: "50%", background: isTod ? "#1a1a1a" : "transparent", border: isSel ? `1px solid #444` : isTod ? `1px solid ${C.border2}` : "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                            {isTod && <div style={{ width: 4, height: 4, borderRadius: "50%", background: C.dim }} />}
+                          </div>
+                      }
+                    </div>
+                    <span style={{ fontSize: 9, color: dow===0?"#ff7070":dow===6?"#7090ff":isSel?C.text:"#3a3a3a", fontWeight: isTod?700:400 }}>{day}</span>
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       )}
 
-      {/* ── Section separator ── */}
-      <div style={{ margin: "18px 20px 0", display: "flex", alignItems: "center", gap: 10 }}>
-        <div style={{ flex: 1, height: 1, background: C.border }} />
-        <span style={{ fontSize: 11, color: C.dim, letterSpacing: "0.08em" }}>
-          {isToday ? "✦ 오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" })}
-        </span>
-        <div style={{ flex: 1, height: 1, background: C.border }} />
+      {/* ══ HEADER ══ */}
+      <div style={{ flexShrink: 0, padding: "16px 20px 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        {/* Date button → opens calendar */}
+        <button onClick={() => setShowCal(true)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}>
+          <div style={{ fontSize: 9, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase", marginBottom: 2 }}>makeblack</div>
+          <div style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-0.03em", color: C.text }}>
+            {isToday ? "오늘" : selDateObj.toLocaleDateString("ko-KR", { month: "long", day: "numeric" })}
+            <span style={{ fontSize: 12, color: C.dim, marginLeft: 6, fontWeight: 400 }}>{calYear}.{String(calMonth+1).padStart(2,"0")} ›</span>
+          </div>
+        </button>
+        {/* Right actions */}
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => setShowCatMgr(true)} style={{ height: 30, padding: "0 12px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>✦ 카테고리</button>
+        </div>
       </div>
 
-      {/* ── Palette strip ── */}
-      {(
-        <div style={{ margin: "14px 20px 0", padding: "14px", background: C.surface, borderRadius: radius.lg, border: `1px solid ${C.border}`, display: "flex", gap: 14, alignItems: "center" }}>
-          <div style={{ width: 72, height: 72, borderRadius: radius.md, overflow: "hidden", flexShrink: 0 }}>
+      {/* ══ TAB BAR ══ */}
+      <div style={{ flexShrink: 0, padding: "14px 20px 0", display: "flex", gap: 6, alignItems: "center" }}>
+        {/* Palette tab */}
+        <button onClick={() => setHomeTab("palette")} style={{ position: "relative", flex: 1, padding: "10px 0", borderRadius: radius.lg, background: homeTab==="palette" ? C.surface : "transparent", border: `1px solid ${homeTab==="palette" ? C.border2 : "transparent"}`, cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s" }}>
+          <div style={{ fontSize: 12, color: homeTab==="palette" ? C.text : C.dim, fontWeight: homeTab==="palette" ? 600 : 400, transition: "color 0.2s" }}>팔레트</div>
+          {drops.length > 0 && (
+            <div style={{ position: "absolute", top: 8, right: 10, display: "flex", gap: 2 }}>
+              {drops.slice(0,5).map(d => <div key={d.id} style={{ width: 5, height: 5, borderRadius: "50%", background: d.color }} />)}
+            </div>
+          )}
+        </button>
+        {/* Progress pill in middle */}
+        <div style={{ padding: "6px 12px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, fontSize: 11, color: isBlack ? "#aaa" : mixedCss || C.dim, fontWeight: 600, minWidth: 52, textAlign: "center", letterSpacing: "-0.01em" }}>
+          {isBlack ? "●" : totalCount > 0 ? `${progress}%` : "—"}
+        </div>
+        {/* Todos tab */}
+        <button onClick={() => setHomeTab("todos")} style={{ position: "relative", flex: 1, padding: "10px 0", borderRadius: radius.lg, background: homeTab==="todos" ? C.surface : "transparent", border: `1px solid ${homeTab==="todos" ? C.border2 : "transparent"}`, cursor: "pointer", fontFamily: "inherit", transition: "all 0.2s" }}>
+          <div style={{ fontSize: 12, color: homeTab==="todos" ? C.text : C.dim, fontWeight: homeTab==="todos" ? 600 : 400, transition: "color 0.2s" }}>할 일</div>
+          {totalCount > 0 && (
+            <div style={{ position: "absolute", top: 8, right: 10, fontSize: 9, color: C.dim }}>{doneCount}/{totalCount}</div>
+          )}
+        </button>
+      </div>
+
+      {/* ══ TAB CONTENT ══ */}
+      <div style={{ flex: 1, overflow: "hidden", position: "relative" }}>
+
+        {/* ── PALETTE TAB ── */}
+        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", padding: "14px 20px 90px", transition: "opacity 0.2s, transform 0.2s", opacity: homeTab==="palette"?1:0, pointerEvents: homeTab==="palette"?"auto":"none", transform: homeTab==="palette"?"translateX(0)":"translateX(-18px)" }}>
+          {/* Big palette canvas */}
+          <div style={{ flex: 1, borderRadius: radius.lg, overflow: "hidden", border: `1px solid ${C.border}`, position: "relative", minHeight: 0 }}>
             <PaletteCanvas drops={drops} version={canvasVer} totalCount={totalCount} animDrop={animDrop} onAnimDone={() => setAnimDrop(null)} />
-          </div>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
-              <span style={{ fontSize: 12, color: C.muted }}>{isToday ? "오늘의 팔레트" : "그날의 팔레트"}</span>
-              <span style={{ fontSize: 11, color: isBlack ? "#aaa" : mixedCss || C.dim }}>
-                {isBlack ? "● black" : `${doneCount}/${totalCount}`}
-              </span>
-            </div>
-            {/* Progress bar */}
-            <div style={{ height: 4, background: C.card, borderRadius: 4, overflow: "hidden", marginBottom: 8 }}>
-              <div style={{ height: "100%", width: `${progress}%`, borderRadius: 4, background: isBlack ? "#444" : mixedCss || C.dim, transition: "width 0.8s ease, background 1s ease" }} />
-            </div>
-            {/* Color dots */}
-            {drops.length > 0 && (
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {drops.map(d => <div key={d.id} style={{ width: 10, height: 10, borderRadius: "50%", background: d.color, boxShadow: `0 0 4px ${d.color}66` }} />)}
+            {drops.length === 0 && (
+              <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 10, pointerEvents: "none" }}>
+                <div style={{ fontSize: 32, color: "#1c1c1c" }}>●</div>
+                <div style={{ fontSize: 12, color: "#222", letterSpacing: "0.12em" }}>할 일을 완료하면 색이 피어나요</div>
               </div>
             )}
-            {drops.length === 0 && <div style={{ fontSize: 11, color: C.dim }}>완료하면 색이 피어납니다 🎨</div>}
           </div>
-        </div>
-      )}
-
-      {/* ── Todo list ── */}
-      <div style={{ padding: "20px 20px 0" }}>
-        {cats.length === 0 && (
-          <div style={{ textAlign: "center", padding: "40px 0", color: C.dim }}>
-            <div style={{ fontSize: 28, marginBottom: 10 }}>✦</div>
-            <div style={{ fontSize: 13 }}>카테고리를 추가해보세요</div>
-          </div>
-        )}
-        {cats.map(cat => {
-          const todos = selTodos[cat.id] || [];
-          const catDone = todos.filter(t => t.done).length;
-          return (
-            <div key={cat.id} style={{ marginBottom: 22 }}>
-              {/* Category pill header */}
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px 4px 8px", background: cat.color + "18", borderRadius: radius.full, border: `1px solid ${cat.color}30` }}>
-                  <div style={{ width: 7, height: 7, borderRadius: "50%", background: cat.color, boxShadow: `0 0 6px ${cat.color}` }} />
-                  <span style={{ fontSize: 12, fontWeight: 600, color: cat.color }}>{cat.name}</span>
-                </div>
-                {todos.length > 0 && (
-                  <span style={{ fontSize: 10, color: C.dim }}>{catDone}/{todos.length}</span>
-                )}
-                <div style={{ flex: 1 }} />
-                <button
-                  onClick={() => { setAddingTo(cat.id); setNewTodoText(""); setTimeout(() => inputRef.current?.focus(), 50); }}
-                  style={{ width: 28, height: 28, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border2}`, color: C.muted, cursor: "pointer", fontSize: 17, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1, transition: "all 0.15s" }}>+</button>
-              </div>
-
-              {/* Todos */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                {todos.map(todo => (
-                  <div key={todo.id} style={{
-                    display: "flex", alignItems: "center", gap: 10,
-                    padding: "11px 13px",
-                    background: todo.done ? "transparent" : C.card,
-                    borderRadius: radius.md,
-                    border: `1px solid ${todo.done ? C.border : C.border2}`,
-                    opacity: todo.done ? 0.45 : 1,
-                    transition: "all 0.25s",
-                  }}>
-                    {/* Round checkbox */}
-                    <div onClick={() => toggleTodo(cat.id, todo.id)} style={{
-                      width: 20, height: 20, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
-                      border: `2px solid ${todo.done ? todo.color : C.border2}`,
-                      background: todo.done ? todo.color : "transparent",
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      transition: "all 0.2s",
-                    }}>
-                      {todo.done && <span style={{ color: "#080808", fontSize: 10, fontWeight: 800 }}>✓</span>}
-                    </div>
-                    <span style={{ flex: 1, fontSize: 13, color: todo.done ? C.muted : C.text, textDecoration: todo.done ? "line-through" : "none", transition: "all 0.2s" }}>{todo.text}</span>
-                    {todo.routineId && <span style={{ fontSize: 9, color: C.dim, background: C.surface, padding: "2px 6px", borderRadius: 4 }}>루틴</span>}
-                    {!todo.routineId && (
-                      <button onClick={() => deleteTodo(cat.id, todo.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1, opacity: 0 }} className="del-btn">✕</button>
-                    )}
-                  </div>
-                ))}
-              </div>
-
-              {/* Add todo inline */}
-              {addingTo === cat.id && (
-                <div style={{ display: "flex", gap: 7, marginTop: 7 }}>
-                  <StyledInput inputRef={inputRef} value={newTodoText} onChange={e => setNewTodoText(e.target.value)}
-                    onKeyDown={e => { if (e.key === "Enter") addTodo(cat.id); if (e.key === "Escape") setAddingTo(null); }}
-                    placeholder="할 일을 입력하고 Enter" />
-                  <button onClick={() => addTodo(cat.id)} style={{ width: 42, height: 42, background: C.text, color: C.bg, border: "none", borderRadius: radius.md, cursor: "pointer", fontWeight: 700, fontSize: 18, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>↵</button>
-                </div>
-              )}
+          {/* Color dots row */}
+          {drops.length > 0 && (
+            <div style={{ flexShrink: 0, marginTop: 12, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+              {drops.map(d => (
+                <div key={d.id} style={{ width: 14, height: 14, borderRadius: "50%", background: d.color, boxShadow: `0 0 7px ${d.color}88` }} />
+              ))}
+              <div style={{ flex: 1 }} />
+              <span style={{ fontSize: 10, color: C.dim }}>{doneCount}개 완료</span>
             </div>
-          );
-        })}
+          )}
+          {/* Hint to switch tab */}
+          <button onClick={() => setHomeTab("todos")} style={{ flexShrink: 0, marginTop: 10, width: "100%", padding: "11px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: radius.lg, color: C.muted, cursor: "pointer", fontSize: 12, fontFamily: "inherit", letterSpacing: "0.04em" }}>
+            할 일 보기 →
+          </button>
+        </div>
+
+        {/* ── TODOS TAB ── */}
+        <div style={{ position: "absolute", inset: 0, overflowY: "auto", padding: "14px 20px 100px", transition: "opacity 0.2s, transform 0.2s", opacity: homeTab==="todos"?1:0, pointerEvents: homeTab==="todos"?"auto":"none", transform: homeTab==="todos"?"translateX(0)":"translateX(18px)" }}>
+          {cats.length === 0 && (
+            <div style={{ textAlign: "center", padding: "60px 0", color: C.dim }}>
+              <div style={{ fontSize: 28, marginBottom: 10, color: "#1e1e1e" }}>✦</div>
+              <div style={{ fontSize: 12, letterSpacing: "0.08em" }}>카테고리를 추가해보세요</div>
+            </div>
+          )}
+          {cats.map(cat => {
+            const todos = selTodos[cat.id] || [];
+            const catDone = todos.filter(t => t.done).length;
+            return (
+              <div key={cat.id} style={{ marginBottom: 26 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 9 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 12px 4px 8px", background: cat.color + "15", borderRadius: radius.full, border: `1px solid ${cat.color}28` }}>
+                    <div style={{ width: 6, height: 6, borderRadius: "50%", background: cat.color, boxShadow: `0 0 5px ${cat.color}` }} />
+                    <span style={{ fontSize: 12, fontWeight: 600, color: cat.color }}>{cat.name}</span>
+                  </div>
+                  {todos.length > 0 && <span style={{ fontSize: 10, color: C.dim }}>{catDone}/{todos.length}</span>}
+                  <div style={{ flex: 1 }} />
+                  <button onClick={() => { setAddingTo(cat.id); setNewTodoText(""); setTimeout(() => inputRef.current?.focus(), 50); }}
+                    style={{ width: 26, height: 26, borderRadius: "50%", background: C.surface, border: `1px solid ${C.border2}`, color: C.muted, cursor: "pointer", fontSize: 16, display: "flex", alignItems: "center", justifyContent: "center" }}>+</button>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  {todos.map(todo => (
+                    <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: todo.done ? "transparent" : C.card, borderRadius: radius.md, border: `1px solid ${todo.done ? C.border : C.border2}`, opacity: todo.done ? 0.42 : 1, transition: "all 0.25s" }}>
+                      <div onClick={() => toggleTodo(cat.id, todo.id)} style={{ width: 20, height: 20, borderRadius: "50%", flexShrink: 0, cursor: "pointer", border: `2px solid ${todo.done ? todo.color : C.border2}`, background: todo.done ? todo.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s" }}>
+                        {todo.done && <span style={{ color: "#080808", fontSize: 10, fontWeight: 800 }}>✓</span>}
+                      </div>
+                      <span style={{ flex: 1, fontSize: 13, color: todo.done ? C.muted : C.text, textDecoration: todo.done ? "line-through" : "none", transition: "all 0.2s" }}>{todo.text}</span>
+                      {todo.routineId && <span style={{ fontSize: 9, color: C.dim, background: C.surface, padding: "2px 6px", borderRadius: 4 }}>루틴</span>}
+                      {!todo.routineId && (
+                        <button onClick={() => deleteTodo(cat.id, todo.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }}>✕</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                {addingTo === cat.id && (
+                  <div style={{ display: "flex", gap: 7, marginTop: 7 }}>
+                    <StyledInput inputRef={inputRef} value={newTodoText} onChange={e => setNewTodoText(e.target.value)}
+                      onKeyDown={e => { if (e.key==="Enter") addTodo(cat.id); if (e.key==="Escape") setAddingTo(null); }}
+                      placeholder="할 일을 입력하고 Enter" />
+                    <button onClick={() => addTodo(cat.id)} style={{ width: 42, height: 42, background: C.text, color: C.bg, border: "none", borderRadius: radius.md, cursor: "pointer", fontWeight: 700, fontSize: 18, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>↵</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {/* Palette peek button */}
+          <button onClick={() => setHomeTab("palette")} style={{ width: "100%", padding: "11px", background: C.surface, border: `1px solid ${C.border}`, borderRadius: radius.lg, color: C.muted, cursor: "pointer", fontSize: 12, fontFamily: "inherit", letterSpacing: "0.04em" }}>
+            ← 팔레트 보기
+          </button>
+        </div>
       </div>
 
       {showCatMgr && (
         <CategoryManager categories={cats} setCategories={setCats} routines={ruts} setRoutines={setRuts} onClose={() => setShowCatMgr(false)} />
       )}
     </div>
-  );
+  )
 }
 
 // ─────────────────────────────────────────────
@@ -816,6 +792,7 @@ export default function MakeBlack() {
       <BottomNav tab={tab} setTab={setTab} />
       <style>{`
         @keyframes fadeIn { from { opacity: 0 } to { opacity: 1 } }
+        @keyframes slideDown { from { transform: translateX(-50%) translateY(-100%) } to { transform: translateX(-50%) translateY(0) } }
         @keyframes pulse  { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(1.08)} }
         input::placeholder { color: #2a2a2a; }
         select option { background: #111; }
