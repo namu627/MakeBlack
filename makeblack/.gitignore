@@ -1,3 +1,5 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
 # dependencies
 node_modules/
 
@@ -5,20 +7,16 @@ node_modules/
 .expo/
 dist/
 web-build/
-
-# env 파일 — 절대 올리면 안 됨
-.env
-.env.local
-.env.production
+expo-env.d.ts
 
 # Native
+.kotlin/
 *.orig.*
 *.jks
 *.p8
 *.p12
 *.key
 *.mobileprovision
-*.orig.*
 
 # Metro
 .metro-health-check*
@@ -37,3 +35,9 @@ yarn-error.*
 
 # typescript
 *.tsbuildinfo
+
+app-example
+
+# generated native folders
+/ios
+/android
