@@ -1,19 +1,28 @@
 import * as Notifications from 'expo-notifications';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
-import { supabase } from './supabase';
 
-// 알림 수신 방식 설정
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
+const isExpoGo = () => {
+  try {
+    const Constants = require('expo-constants').default;
+    return Constants.appOwnership === 'expo';
+  } catch {
+    return false;
+  }
+};
 
-// ── 알림 권한 요청 ─────────────────────────────────────
+if (!isExpoGo()) {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
+}
+
 export const requestNotificationPermission = async () => {
+  if (isExpoGo()) return false;
   if (!Device.isDevice) return false;
 
   const { status: existingStatus } = await Notifications.getPermissionsAsync();
@@ -35,10 +44,9 @@ export const requestNotificationPermission = async () => {
   return finalStatus === 'granted';
 };
 
-// ── 로컬 리마인더 예약 ────────────────────────────────
 export const scheduleReminder = async (hour, minute) => {
+  if (isExpoGo()) return;
   await Notifications.cancelAllScheduledNotificationsAsync();
-
   await Notifications.scheduleNotificationAsync({
     content: {
       title: '오늘 팔레트를 채워볼까요? 🎨',
@@ -50,12 +58,9 @@ export const scheduleReminder = async (hour, minute) => {
       minute,
     },
   });
-
-  console.log(`리마인더 설정: 매일 ${hour}:${String(minute).padStart(2,'0')}`);
 };
 
-// ── 리마인더 취소 ─────────────────────────────────────
 export const cancelReminder = async () => {
+  if (isExpoGo()) return;
   await Notifications.cancelAllScheduledNotificationsAsync();
-  console.log('리마인더 취소됨');
 };

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
+import PaletteCanvas from '../../components/PaletteCanvas';
 import {
   View, Text, ScrollView, TouchableOpacity,
   TextInput, StyleSheet, ActivityIndicator,
@@ -437,22 +438,29 @@ function TeamDetailScreen({ team, userId, onBack }) {
       </View>
 
       {/* 팔레트 프리뷰 */}
-      <View style={[styles.palettePreview, isBlack && styles.palettePreviewBlack]}>
-        {doneTodos.length === 0 ? (
-          <Text style={styles.paletteEmpty}>팀 할일을 완료하면 팔레트가 채워져요 🎨</Text>
-        ) : (
-          <View style={styles.paletteDotsRow}>
-            {doneTodos.slice(0, 10).map(t => (
-              <View key={t.id} style={[styles.paletteDot, { backgroundColor: t.color ?? '#888' }]} />
-            ))}
-            {doneTodos.length > 10 && <Text style={styles.paletteMore}>+{doneTodos.length - 10}</Text>}
-            {isBlack && <Text style={styles.blackBadge}>⬛ BLACK</Text>}
+      <View style={{ alignItems: 'center', marginHorizontal: 20, marginBottom: 16, gap: 10 }}>
+        <PaletteCanvas
+          drops={paletteDrops}
+          totalCount={todos.length}
+          size={160}
+        />
+        <View style={{ width: 160, gap: 6 }}>
+          <View style={styles.progressBar}>
+            <View style={[styles.progressFill, {
+              width: todos.length > 0 ? `${(doneTodos.length / todos.length) * 100}%` : '0%',
+              backgroundColor: isBlack ? '#333' : '#f0ece6',
+            }]} />
           </View>
-        )}
-        <View style={styles.progressBar}>
-          <View style={[styles.progressFill, { width: todos.length > 0 ? `${(doneTodos.length / todos.length) * 100}%` : '0%' }]} />
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            <View style={{ flexDirection: 'row', gap: 4, flex: 1 }}>
+              {paletteDrops.slice(0, 10).map(d => (
+                <View key={d.id} style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: d.color ?? '#888' }} />
+              ))}
+              {paletteDrops.length > 10 && <Text style={{ fontSize: 9, color: '#555' }}>+{paletteDrops.length - 10}</Text>}
+            </View>
+            <Text style={styles.progressText}>{doneTodos.length} / {todos.length}</Text>
+          </View>
         </View>
-        <Text style={styles.progressText}>{doneTodos.length} / {todos.length}</Text>
       </View>
 
       {/* 할일 목록 */}
