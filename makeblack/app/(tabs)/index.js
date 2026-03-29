@@ -15,6 +15,7 @@ import {
   updateTodoText, fetchPaletteHistory, upsertPaletteHistory,
 } from '../../lib/todoService';
 import PaletteCanvas from '../../components/PaletteCanvas';
+import FlyingOrb from '../../components/FlyingOrb';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 const PALETTE_SIZE = Math.min(SW * 0.52, 200);
@@ -68,8 +69,7 @@ export default function HomeScreen() {
   const targetCellPos = useRef({ x: SW / 2, y: 120 });
 
   // Flying Orb
-  const [flyOrb, setFlyOrb] = useState(false);
-  const orbProgress = useRef(new Animated.Value(0)).current;
+  const [flyOrb, setFlyOrb] = useState(null); // { sx, sy, tx, ty } or null
 
   // 카테고리 모달
   const [catModalVisible, setCatModalVisible] = useState(false);
@@ -203,44 +203,41 @@ const loadMonthHistory = async (y, m) => {
     const cellIdx = fDow + d - 1;
     const col = cellIdx % 7;
     const row = Math.floor(cellIdx / 7);
-    targetCellPos.current = {
-      x: col * cellW + cellW / 2,
-      y: gridTopY + row * cellH + cellH / 2,
-    };
+    const tx = col * cellW + cellW / 2;
+    const ty = gridTopY + row * cellH + cellH / 2;
 
-    setFlyOrb(true);
-    orbProgress.setValue(0);
-    Animated.timing(orbProgress, { toValue: 1, duration: 480, useNativeDriver: true }).start(({ finished }) => {
-      if (finished) {
-        setFlyOrb(false);
-        // 1880ms: 스탬프
-        setStampDate(selectedDate);
-        stampScale.setValue(2.4);
-        stampOpacity.setValue(0);
-        rippleScale.setValue(1);
-        rippleOpacity.setValue(0.6);
-        Animated.parallel([
-          Animated.sequence([
-            Animated.spring(stampScale, { toValue: 0.85, useNativeDriver: true, friction: 8 }),
-            Animated.spring(stampScale, { toValue: 1.12, useNativeDriver: true }),
-            Animated.spring(stampScale, { toValue: 1, useNativeDriver: true }),
-          ]),
-          Animated.timing(stampOpacity, { toValue: 1, duration: 250, useNativeDriver: true }),
-        ]).start();
-        // 리플
-        blackTimer.current = setTimeout(() => {
-          Animated.parallel([
-            Animated.timing(rippleScale, { toValue: 2.8, duration: 700, useNativeDriver: true }),
-            Animated.timing(rippleOpacity, { toValue: 0, duration: 700, useNativeDriver: true }),
-          ]).start();
-        }, 150);
-        // 2280ms: 닫기
-        blackTimer.current = setTimeout(() => {
-          setStampDate(null);
-          closeCalendar();
-        }, 400);
-      }
-    });
+    targetCellPos.current = { x: tx, y: ty };
+    setFlyOrb({ sx: SW / 2, sy: SH / 2, tx, ty });
+  };
+
+  const handleOrbDone = () => {
+    setFlyOrb(null);
+    // 스탬프
+    setStampDate(selectedDate);
+    stampScale.setValue(2.4);
+    stampOpacity.setValue(0);
+    rippleScale.setValue(1);
+    rippleOpacity.setValue(0.6);
+    Animated.parallel([
+      Animated.sequence([
+        Animated.spring(stampScale, { toValue: 0.85, useNativeDriver: true, friction: 8 }),
+        Animated.spring(stampScale, { toValue: 1.12, useNativeDriver: true }),
+        Animated.spring(stampScale, { toValue: 1, useNativeDriver: true }),
+      ]),
+      Animated.timing(stampOpacity, { toValue: 1, duration: 250, useNativeDriver: true }),
+    ]).start();
+    // 리플
+    blackTimer.current = setTimeout(() => {
+      Animated.parallel([
+        Animated.timing(rippleScale, { toValue: 2.8, duration: 700, useNativeDriver: true }),
+        Animated.timing(rippleOpacity, { toValue: 0, duration: 700, useNativeDriver: true }),
+      ]).start();
+    }, 150);
+    // 닫기
+    blackTimer.current = setTimeout(() => {
+      setStampDate(null);
+      closeCalendar();
+    }, 400);
   };
 
   const openCalendar = () => {
@@ -369,12 +366,6 @@ const loadMonthHistory = async (y, m) => {
     : paletteDrops.length === 1 ? paletteDrops[0].color
     : { colors: [firstDropColor, mixedColor], start: { x: 0, y: 0 }, end: { x: 1, y: 0 } };
 
-  // Orb 위치 보간
-  const orbX = orbProgress.interpolate({ inputRange: [0, 1], outputRange: [SW / 2, targetCellPos.current.x] });
-  const orbY = orbProgress.interpolate({ inputRange: [0, 1], outputRange: [SH / 2, targetCellPos.current.y] });
-  const orbSize = orbProgress.interpolate({ inputRange: [0, 1], outputRange: [40, 16] });
-  const orbOpacity = orbProgress.interpolate({ inputRange: [0, 0.8, 1], outputRange: [1, 1, 0] });
-
   // 캘린더 계산
   const calYear = viewMonth.y, calMonth = viewMonth.m;
   const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
@@ -441,7 +432,14 @@ const loadMonthHistory = async (y, m) => {
           <View style={s.progressInfo}>
             <View style={s.dotsRow}>
               {paletteDrops.slice(0, 10).map(d => (
-                <View key={d.id} style={[s.dot, { backgroundColor: d.color }]} />
+                <View key={d.id} style={[s.dot, {
+                  backgroundColor: d.color,
+                  shadowColor: d.color,
+                  shadowOpacity: 0.5,
+                  shadowRadius: 4,
+                  shadowOffset: { width: 0, height: 0 },
+                  elevation: 2,
+                }]} />
               ))}
               {paletteDrops.length > 10 && <Text style={s.dotMore}>+{paletteDrops.length - 10}</Text>}
             </View>
@@ -594,13 +592,13 @@ const loadMonthHistory = async (y, m) => {
 
       {/* ── Flying Orb ── */}
       {flyOrb && (
-        <Animated.View style={[s.orbBase, {
-          opacity: orbOpacity,
-          transform: [
-            { translateX: Animated.subtract(orbX, new Animated.Value(20)) },
-            { translateY: Animated.subtract(orbY, new Animated.Value(20)) },
-          ],
-        }]} />
+        <FlyingOrb
+          sx={flyOrb.sx}
+          sy={flyOrb.sy}
+          tx={flyOrb.tx}
+          ty={flyOrb.ty}
+          onDone={handleOrbDone}
+        />
       )}
 
       {/* ── 캘린더 시트 (스펙 §8) ── */}

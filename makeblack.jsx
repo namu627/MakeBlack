@@ -37,9 +37,10 @@ function mixRgbList(rgbList, totalCount = null) {
   const g = (1 - avgM) * 255;
   const b = (1 - avgY) * 255;
   // 진행률 기반 추가 다크닝 — 100% 완료 시 검정으로 수렴
+  // pow(0.45): 초반엔 색이 살아있고 70% 이후 급격히 어두워짐
   const total = totalCount || n;
   const progress = n / total;
-  const darken = Math.max(0.02, 1 - Math.pow(progress, 0.7) * 0.98);
+  const darken = Math.max(0.03, 1 - Math.pow(progress, 0.45) * 0.97);
   return [r * darken, g * darken, b * darken];
 }
 function generateUniqueColor(usedHues) {
@@ -105,12 +106,23 @@ function drawInkOnWater(ctx, cx, cy, r, g, b, radius, seed, opacity = 1, canvasS
       if (a < 0.005) continue;
       const idx  = (py * w + px) * 4;
       const aOld = data[idx + 3] / 255;
-      const aOut = a + aOld * (1 - a);
-      if (aOut < 0.001) continue;
-      data[idx    ] = (r * a + data[idx    ] * aOld * (1 - a)) / aOut;
-      data[idx + 1] = (g * a + data[idx + 1] * aOld * (1 - a)) / aOut;
-      data[idx + 2] = (b * a + data[idx + 2] * aOld * (1 - a)) / aOut;
-      data[idx + 3] = aOut * 255;
+
+      if (aOld < 0.01) {
+        // 빈 픽셀 — 그냥 새 색 칠하기
+        data[idx    ] = r;
+        data[idx + 1] = g;
+        data[idx + 2] = b;
+        data[idx + 3] = a * 255;
+      } else {
+        // 물감 혼합: 두 색을 a 비율로 선형 보간 (셀로판지가 아닌 진짜 혼합)
+        // a가 높을수록 새 색이 강하게 섞임
+        const blend = Math.min(a, 0.82); // 최대 혼합 강도 제한 (완전 덮임 방지)
+        data[idx    ] = data[idx    ] * (1 - blend) + r * blend;
+        data[idx + 1] = data[idx + 1] * (1 - blend) + g * blend;
+        data[idx + 2] = data[idx + 2] * (1 - blend) + b * blend;
+        // 알파는 기존보다 약간만 높이기 (이미 칠해진 영역은 불투명 유지)
+        data[idx + 3] = Math.min(255, data[idx + 3] + a * 30);
+      }
     }
   }
   ctx.putImageData(img, x0, y0);
@@ -135,7 +147,7 @@ function renderPalette(canvas, drops, totalCount, size = S) {
       const [r, g, b] = drops[i].rgb;
       const cx = drops[i].px * size, cy = drops[i].py * size;
       const cornerDist = Math.sqrt(Math.max(cx, size - cx) ** 2 + Math.max(cy, size - cy) ** 2);
-      drawInkOnWater(ctx, cx, cy, r, g, b, cornerDist * 0.55, drops[i].seed * 0.001, 0.92, size);
+      drawInkOnWater(ctx, cx, cy, r, g, b, cornerDist * 0.42, drops[i].seed * 0.001, 0.88, size);
     }
   } else if (drops.length > cached.dropCount) {
     // 새 drop만 증분으로 그리기
@@ -143,12 +155,13 @@ function renderPalette(canvas, drops, totalCount, size = S) {
       const [r, g, b] = drops[i].rgb;
       const cx = drops[i].px * size, cy = drops[i].py * size;
       const cornerDist = Math.sqrt(Math.max(cx, size - cx) ** 2 + Math.max(cy, size - cy) ** 2);
-      drawInkOnWater(ctx, cx, cy, r, g, b, cornerDist * 0.55, drops[i].seed * 0.001, 0.92, size);
+      drawInkOnWater(ctx, cx, cy, r, g, b, cornerDist * 0.42, drops[i].seed * 0.001, 0.88, size);
     }
   }
 
-  // BLACK 오버레이
-  if (totalCount && drops.length >= totalCount) {
+  // BLACK 오버레이 — drops가 totalCount를 채웠을 때만 적용
+  // totalCount > drops.length 이면 (할일 추가됨) 오버레이 없음 → 추가된 것 완료 시 다시 어두워짐
+  if (totalCount && totalCount > 0 && drops.length === totalCount) {
     ctx.fillStyle = "rgba(0,0,0,0.82)";
     ctx.fillRect(0, 0, size, size);
   }
@@ -182,19 +195,61 @@ function PaletteCanvas({ drops, version, totalCount, animDrop, onAnimDone }) {
     const cx = animDrop.px * S, cy = animDrop.py * S;
     const seed = animDrop.seed * 0.001;
     const cornerDist = Math.sqrt(Math.max(cx, S - cx) ** 2 + Math.max(cy, S - cy) ** 2);
-    const maxR = cornerDist * 0.55;
-    let frame = 0; const FRAMES = 68; let raf;
-    function draw() {
-      ctx.clearRect(0, 0, S, S);
-      const t = frame / FRAMES;
-      const eExpand = 1 - Math.pow(1 - Math.min(t * 1.15, 1), 3.5);
-      const eFade   = t < 0.52 ? 1 : Math.max(0, 1 - (t - 0.52) / 0.48);
-      if (eFade <= 0) { ctx.clearRect(0, 0, S, S); onAnimDone(); return; }
-      const curR = eExpand * maxR;
-      if (curR > 2) drawInkOnWater(ctx, cx, cy, r, g, b, curR, seed, eFade * 0.85, S);
-      frame++; raf = requestAnimationFrame(draw);
+    const maxR = cornerDist * 0.42;
+
+    // 마지막 drop(isLast 플래그)인지 판별
+    const isBlackDrop = !!animDrop.isLast;
+
+    let frame = 0;
+    let raf;
+
+    if (isBlackDrop) {
+      // 마지막 drop: 중심에서 빛이 퍼지다가 검게 수렴하는 이펙트
+      // Phase 1 (0~0.4): 흰-회색빛 잉크가 빠르게 확산
+      // Phase 2 (0.4~1.0): 검정으로 점점 어두워지며 정착
+      const FRAMES = 90;
+      function draw() {
+        ctx.clearRect(0, 0, S, S);
+        const t = frame / FRAMES;
+
+        if (t <= 0.45) {
+          // 확산 단계 — 밝은 회색 잉크가 퍼짐 (배경 #0d0c0b와 대비)
+          const expand = 1 - Math.pow(1 - t / 0.45, 2.8);
+          const curR = expand * maxR;
+          const brightness = Math.round(180 - t * 200); // 180 → 90 (어두워짐)
+          const lum = Math.max(30, brightness);
+          if (curR > 2) drawInkOnWater(ctx, cx, cy, lum, lum, lum, curR, seed, 0.9, S);
+        } else {
+          // 수렴 단계 — 검정 물감이 덮으며 정착
+          const t2 = (t - 0.45) / 0.55;
+          const darkenAlpha = Math.pow(t2, 0.6) * 0.78;
+          // 이미 퍼진 잉크 위에 검정을 점점 올림
+          const spreadR = maxR * (1 + t2 * 0.15);
+          drawInkOnWater(ctx, cx, cy, 8, 8, 8, spreadR, seed, darkenAlpha, S);
+          // 완전히 수렴 후 종료
+          if (t2 >= 1) { ctx.clearRect(0, 0, S, S); onAnimDone(); return; }
+        }
+
+        frame++;
+        raf = requestAnimationFrame(draw);
+      }
+      raf = requestAnimationFrame(draw);
+    } else {
+      // 일반 drop: 기존 확산 → 페이드 아웃 애니메이션
+      const FRAMES = 68;
+      function draw() {
+        ctx.clearRect(0, 0, S, S);
+        const t = frame / FRAMES;
+        const eExpand = 1 - Math.pow(1 - Math.min(t * 1.15, 1), 3.5);
+        const eFade   = t < 0.52 ? 1 : Math.max(0, 1 - (t - 0.52) / 0.48);
+        if (eFade <= 0) { ctx.clearRect(0, 0, S, S); onAnimDone(); return; }
+        const curR = eExpand * maxR;
+        if (curR > 2) drawInkOnWater(ctx, cx, cy, r, g, b, curR, seed, eFade * 0.85, S);
+        frame++; raf = requestAnimationFrame(draw);
+      }
+      raf = requestAnimationFrame(draw);
     }
-    raf = requestAnimationFrame(draw);
+
     return () => cancelAnimationFrame(raf);
   }, [animDrop]);
 
@@ -202,7 +257,6 @@ function PaletteCanvas({ drops, version, totalCount, animDrop, onAnimDone }) {
     <div style={{ position: "relative", width: "100%", aspectRatio: "1" }}>
       <canvas ref={staticRef} width={S} height={S} style={{ width: "100%", height: "100%", borderRadius: 14, display: "block" }} />
       <canvas ref={animRef}   width={S} height={S} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", borderRadius: 14, pointerEvents: "none" }} />
-
     </div>
   );
 }
@@ -233,7 +287,9 @@ function OnboardingOverlay({ onDone }) {
     { icon: "🎨", title: "MakeBlack", desc: "할 일을 완료할 때마다\n물감이 팔레트에 퍼져나가요" },
     { icon: "✦",  title: "색이 섞여요", desc: "여러 할 일을 완료할수록\n색이 혼합되어 검정으로 가까워져요" },
     { icon: "●",  title: "BLACK 달성", desc: "모든 할 일을 완료하면\n팔레트가 BLACK이 돼요" },
-    { icon: "◈",  title: "팀 팔레트", desc: "친구와 팀을 만들어\n함께 팔레트를 BLACK으로 채워요\n각자의 색이 섞여 하나가 돼요" },
+    { icon: "◈",  title: "BLEND", desc: "팀을 만들어 함께 팔레트를 채워요\n각자의 고유 색이 섞여 하나가 됩니다" },
+    { icon: "🎨",  title: "BLEND 팀 코드", desc: "팀마다 고유 코드가 생성돼요\n코드를 공유하면 누구든 참여 요청을 보낼 수 있어요" },
+    { icon: "◉",  title: "내 색을 골라요", desc: "팀 안에서 나만의 색을 선택해요\n내가 완료한 할 일이 그 색으로 팔레트에 피어나요" },
   ];
   const s = steps[step];
   return (
@@ -339,6 +395,7 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
   const [newCatName, setNewCatName] = useState("");
   const [newCatColor, setNewCatColor] = useState("#6c8fff");
   const [routineForm, setRoutineForm] = useState(null);
+  const [editingCatColor, setEditingCatColor] = useState(null); // catId | null
   const COLORS = ["#6c8fff","#ff7c6e","#a8e063","#ffd166","#c77dff","#06d6a0","#ffb347","#ef476f","#4ecdc4","#f7b731"];
 
   const addCat = () => {
@@ -405,27 +462,51 @@ function CategoryManager({ categories, setCategories, routines, setRoutines, onC
           </div>
         )}
         {categories.map((cat, idx) => (
-          <div key={cat.id}
-            draggable
-            onDragStart={e => e.dataTransfer.setData("catIdx", idx)}
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => {
-              const from = Number(e.dataTransfer.getData("catIdx"));
-              if (from === idx) return;
-              const next = [...categories];
-              next.splice(idx, 0, next.splice(from, 1)[0]);
-              setCategories(next);
-            }}
-            style={{
-              display: "flex", alignItems: "center", gap: 12,
-              padding: "13px 14px", marginBottom: 6,
-              background: C.card, borderRadius: radius.md,
-              border: `1px solid ${C.border}`, cursor: "grab",
-            }}>
-            <span style={{ fontSize: 14, color: C.dim, cursor: "grab", flexShrink: 0, letterSpacing: "0.05em" }}>⠿</span>
-            <div style={{ width: 10, height: 10, borderRadius: "50%", background: cat.color, boxShadow: `0 0 8px ${cat.color}88`, flexShrink: 0 }} />
-            <span style={{ flex: 1, color: C.text, fontSize: 14 }}>{cat.name}</span>
-            <button onClick={() => delCat(cat.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 16, padding: 0, lineHeight: 1 }}>✕</button>
+          <div key={cat.id}>
+            <div
+              draggable
+              onDragStart={e => e.dataTransfer.setData("catIdx", idx)}
+              onDragOver={e => e.preventDefault()}
+              onDrop={e => {
+                const from = Number(e.dataTransfer.getData("catIdx"));
+                if (from === idx) return;
+                const next = [...categories];
+                next.splice(idx, 0, next.splice(from, 1)[0]);
+                setCategories(next);
+              }}
+              style={{
+                display: "flex", alignItems: "center", gap: 12,
+                padding: "13px 14px", marginBottom: editingCatColor === cat.id ? 0 : 6,
+                background: C.card, borderRadius: editingCatColor === cat.id ? `${radius.md}px ${radius.md}px 0 0` : radius.md,
+                border: `1px solid ${editingCatColor === cat.id ? cat.color+"88" : C.border}`,
+                borderBottom: editingCatColor === cat.id ? "none" : undefined,
+                cursor: "grab",
+              }}>
+              <span style={{ fontSize: 14, color: C.dim, cursor: "grab", flexShrink: 0, letterSpacing: "0.05em" }}>⠿</span>
+              {/* 색 도트 — 클릭하면 색 변경 */}
+              <div
+                onClick={() => setEditingCatColor(editingCatColor === cat.id ? null : cat.id)}
+                title="색 변경"
+                style={{ width: 18, height: 18, borderRadius: "50%", background: cat.color, boxShadow: `0 0 8px ${cat.color}88`, flexShrink: 0, cursor: "pointer", border: `2px solid ${editingCatColor === cat.id ? "#fff" : "transparent"}`, transition: "border 0.15s" }}
+              />
+              <span style={{ flex: 1, color: C.text, fontSize: 14 }}>{cat.name}</span>
+              <button onClick={() => delCat(cat.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 16, padding: 0, lineHeight: 1 }}>✕</button>
+            </div>
+            {/* 인라인 색 변경 피커 */}
+            {editingCatColor === cat.id && (
+              <div style={{ display: "flex", gap: 7, flexWrap: "wrap", padding: "12px 14px", marginBottom: 6, background: C.card, borderRadius: `0 0 ${radius.md}px ${radius.md}px`, border: `1px solid ${cat.color+"88"}`, borderTop: "none" }}>
+                {COLORS.map(c => (
+                  <div key={c} onClick={() => {
+                    setCategories(cs => cs.map(x => x.id === cat.id ? { ...x, color: c } : x));
+                    setEditingCatColor(null);
+                  }} style={{
+                    width: 26, height: 26, borderRadius: "50%", background: c, cursor: "pointer",
+                    outline: cat.color === c ? `2px solid #fff` : "2px solid transparent",
+                    outlineOffset: 2, transition: "outline 0.12s",
+                  }} />
+                ))}
+              </div>
+            )}
           </div>
         ))}
       </>)}
@@ -640,6 +721,21 @@ function FlyingOrb({ sx, sy, tx, ty, drops, totalCount }) {
 // ─────────────────────────────────────────────
 // Home Screen
 // ─────────────────────────────────────────────
+
+// hex(#rrggbb) 또는 hsl() 카테고리 색 → drop 색상 객체 변환 헬퍼
+function catColorToDrop(catColor, fallbackHue = 0) {
+  if (!catColor) return { hue: fallbackHue, rgb: hslToRgb(fallbackHue, 78, 58), color: `hsl(${fallbackHue},78%,58%)` };
+  if (catColor.startsWith('#')) {
+    const hex = catColor.replace('#', '');
+    const r = parseInt(hex.slice(0,2),16), g = parseInt(hex.slice(2,4),16), b = parseInt(hex.slice(4,6),16);
+    const [hue] = rgbToHsl(r, g, b);
+    return { hue, rgb: hslToRgb(hue, 78, 58), color: `hsl(${Math.round(hue)},78%,58%)` };
+  }
+  const m = catColor.match(/\d+/g);
+  const hue = m ? Number(m[0]) : fallbackHue;
+  return { hue, rgb: hslToRgb(hue, 78, 58), color: `hsl(${Math.round(hue)},78%,58%)` };
+}
+
 function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHistory, todosByDate, setTodosByDate, selectedDate, setSelectedDate, settings }) {
   // Dynamic today — refreshes at midnight
   const [todayKey, setTodayKey]         = useState(getTodayKey);
@@ -659,6 +755,7 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
   const [canvasVer, setCanvasVer]       = useState(0);
   const [blackPhase, setBlackPhase]     = useState(null); // null | "in" | "out"
   const [usedHues, setUsedHues]         = useState([]);
+  const blackShownDates                 = useRef(new Set()); // 날짜별 BLACK 1회 보장
   // selectedDate 바뀌면 usedHues 초기화 (날짜별 독립 색상 관리)
   const prevDateRef = useRef(selectedDate);
   useEffect(() => {
@@ -706,25 +803,12 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
         const saved = (todosByDate[dk]?.[rut.catId] || []).find(t => t.id === routineTodoId);
         // 루틴 todo에 카테고리 색 부여 (체크박스, 완료 표시에 사용)
         const rutCat = cats.find(ct => ct.id === rut.catId);
-        const rutHue = (() => {
-          if (!rutCat) return (rut.id * 47) % 360;
-          const col = rutCat.color;
-          // hex 색상 → RGB → HSL
-          if (col.startsWith('#')) {
-            const hex = col.replace('#','');
-            const r = parseInt(hex.slice(0,2),16), g = parseInt(hex.slice(2,4),16), b = parseInt(hex.slice(4,6),16);
-            return rgbToHsl(r, g, b)[0];
-          }
-          // hsl() 형식
-          const m = col.match(/\d+/g);
-          return m ? Number(m[0]) : (rut.id * 47) % 360;
-        })();
-        const rutRgb = hslToRgb(rutHue, 72, 56);
+        const { hue: rutHue, rgb: rutRgb, color: rutColor } = catColorToDrop(rutCat?.color, (rut.id * 47) % 360);
         result[rut.catId] = [{
           id: routineTodoId, text: rut.name,
           done: saved?.done ?? false,
           routineId: rut.id,
-          hue: rutHue, rgb: rutRgb, color: `hsl(${Math.round(rutHue)},72%,56%)`,
+          hue: rutHue, rgb: rutRgb, color: rutColor,
           seed: rut.id * 7
         }, ...catTodos];
       }
@@ -755,8 +839,10 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
   const drops      = histEntry.drops || [];
 
   useEffect(() => {
-    if (isBlack && blackPhase === null) {
-      if (!settings.blackAnimationOn) return; // 애니메이션 off 시 스킵
+    const key = `${selectedDate}:${totalCount}`;
+    if (isBlack && blackPhase === null && !blackShownDates.current.has(key)) {
+      if (!settings.blackAnimationOn) { blackShownDates.current.add(key); return; }
+      blackShownDates.current.add(key);
       setBlackPhase("in");
       clearTimeout(blackTimer.current);
       blackTimer.current = setTimeout(() => {
@@ -800,7 +886,6 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
     const todo = (selTodos[catId] || []).find(t => t.id === todoId);
     if (!todo) return;
     const willDone = !todo.done;
-    // 완료 → 미완료: 팔레트 drop도 제거되니 의도적 동작임을 보장
     setTodosByDate(prev => {
       const base = prev[dk] || {};
       const allCat = selTodos[catId] || [];
@@ -809,17 +894,26 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
     });
     setPaletteHistory(prev => {
       const entry = prev[dk] || { drops: [], total: 0 };
-      // total을 항상 현재 allTodos.length로 동기화
       const syncedTotal = allTodos.length;
       if (willDone) {
         if (entry.drops.some(d => d.id === todoId)) return prev;
-        const { hue, rgb, color } = generateUniqueColor(entry.drops.map(d => d.hue));
+        // 항상 카테고리 색으로 drop 저장 (검정을 drop으로 저장하면 취소 시 오염됨)
+        const remainingUndone = allTodos.filter(t => !t.done && t.id !== todoId).length;
+        const isLast = remainingUndone === 0 && syncedTotal > 0;
+        const cat = cats.find(c => c.id === catId);
+        const { hue, rgb, color } = catColorToDrop(cat?.color, 0);
         const seed = uid() * 17;
-        const drop = { id: todoId, hue, rgb, color, px: 0.12 + Math.random() * 0.76, py: 0.12 + Math.random() * 0.76, seed };
+        const drop = {
+          id: todoId, hue, rgb, color,
+          px: 0.12 + Math.random() * 0.76, py: 0.12 + Math.random() * 0.76,
+          seed, isLast,  // isLast 플래그: 애니메이션에서 검정 이펙트 재생용
+        };
         setAnimDrop(drop); setCanvasVer(v => v + 1);
         return { ...prev, [dk]: { drops: [...entry.drops, drop], total: syncedTotal } };
       } else {
         setCanvasVer(v => v + 1); setBlackPhase(null); clearTimeout(blackTimer.current);
+        // 완료 취소 시 BLACK 기록 제거 → 재완료 시 애니메이션 다시 재생
+        blackShownDates.current.delete(`${dk}:${allTodos.length}`);
         return { ...prev, [dk]: { ...entry, drops: entry.drops.filter(d => d.id !== todoId), total: syncedTotal } };
       }
     });
@@ -827,7 +921,9 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
 
   const addTodo = (catId) => {
     if (!newTodoText.trim()) { setAddingTo(null); return; }
-    const { hue, rgb, color } = generateUniqueColor(usedHues);
+    // 카테고리 색 기반 색상
+    const cat = cats.find(c => c.id === catId);
+    const { hue, rgb, color } = catColorToDrop(cat?.color, Math.floor(Math.random()*360));
     const seed = uid() * 31;
     const todo = { id: uid(), text: newTodoText.trim(), done: false, hue, rgb, color, seed };
     setUsedHues(h => [...h, hue]);
@@ -835,6 +931,7 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
       const base = prev[selectedDate] || {};
       return { ...prev, [selectedDate]: { ...base, [catId]: [...(base[catId] || []), todo] } };
     });
+    setCanvasVer(v => v + 1);
     setNewTodoText(""); setAddingTo(null);
   };
 
@@ -1111,10 +1208,34 @@ function HomeScreen({ cats, setCats, ruts, setRuts, paletteHistory, setPaletteHi
               <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                 {todos.map(todo => {
                   const isEditing = editingTodo?.todoId === todo.id;
+                  // 미완료가 이 할일 1개만 남았을 때
+                  const isLastOne = !todo.done && !isBlack && (allTodos.filter(t => !t.done).length === 1);
                   return (
-                    <div key={todo.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 13px", background: isEditing ? C.surface : todo.done ? "transparent" : C.card, borderRadius: radius.md, border: `1px solid ${isEditing ? C.border2 : todo.done ? C.border : C.border2}`, opacity: todo.done && !isEditing ? 0.42 : 1, transition: "all 0.2s" }}>
+                    <div key={todo.id} style={{
+                      display: "flex", alignItems: "center", gap: 10,
+                      padding: "11px 13px",
+                      background: isEditing ? C.surface : todo.done ? "transparent" : C.card,
+                      borderRadius: radius.md,
+                      border: isLastOne
+                        ? `1.5px solid ${C.text}`
+                        : `1px solid ${isEditing ? C.border2 : todo.done ? C.border : C.border2}`,
+                      boxShadow: isLastOne
+                        ? `0 0 0 1px ${C.text}18, 0 0 14px 3px ${C.text}22, inset 0 0 8px ${C.text}08`
+                        : "none",
+                      opacity: todo.done && !isEditing ? 0.42 : 1,
+                      transition: "border 0.3s, box-shadow 0.3s, opacity 0.2s",
+                      animation: isLastOne ? "lastGlow 1.8s ease-in-out infinite" : "none",
+                    }}>
                       {/* 체크박스 */}
-                      <div onClick={() => !isEditing && toggleTodo(cat.id, todo.id)} style={{ width: 20, height: 20, borderRadius: "50%", flexShrink: 0, cursor: isEditing ? "default" : "pointer", border: `2px solid ${todo.done ? todo.color : C.border2}`, background: todo.done ? todo.color : "transparent", display: "flex", alignItems: "center", justifyContent: "center", transition: "all 0.2s" }}>
+                      <div onClick={() => !isEditing && toggleTodo(cat.id, todo.id)} style={{
+                        width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
+                        cursor: isEditing ? "default" : "pointer",
+                        border: `2px solid ${todo.done ? todo.color : isLastOne ? C.text : C.border2}`,
+                        background: todo.done ? todo.color : "transparent",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        transition: "all 0.2s",
+                        boxShadow: isLastOne ? `0 0 7px 2px ${C.text}44` : "none",
+                      }}>
                         {todo.done && <span style={{ color: "#080808", fontSize: 10, fontWeight: 800 }}>✓</span>}
                       </div>
                       {/* 텍스트 or 편집 인풋 */}
@@ -1189,18 +1310,47 @@ function Toggle({ on, onChange }) {
 }
 
 function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
-  const [section, setSection] = useState(null); // null | "account" | "privacy" | "app" | "palette" | "pin" | "notification"
+  const [section, setSection] = useState(null);
   const [pinInput, setPinInput] = useState("");
   const [pinConfirm, setPinConfirm] = useState("");
-  const [pinStep, setPinStep] = useState(() => settings.pin ? 0 : 1); // 기존 PIN 있으면 확인부터
+  const [pinStep, setPinStep] = useState(() => settings.pin ? 0 : 1);
   const [editField, setEditField] = useState(null); // { key, value }
+  const [handleError, setHandleError] = useState(""); // 핸들 전용 에러 메시지
+  const [handleOk, setHandleOk]   = useState(false);  // 사용 가능 확인
+
+  // 핸들 형식 검증: @영문·숫자·_ 3~20자
+  const HANDLE_RE = /^@[a-z0-9_]{2,19}$/i;
+  // 프로토타입용 중복 핸들 목록 (실제 서비스에서는 서버 체크)
+  const TAKEN_HANDLES = ["@bora","@chan","@minjun","@sora","@yuna","@jinho","@heera","@admin","@makeblack"];
+
+  const validateHandle = (val) => {
+    const v = val.startsWith("@") ? val : "@" + val;
+    if (!HANDLE_RE.test(v)) {
+      setHandleError("영문, 숫자, _만 사용 가능 (2~19자)");
+      setHandleOk(false); return false;
+    }
+    if (TAKEN_HANDLES.includes(v.toLowerCase())) {
+      setHandleError("이미 사용 중인 아이디예요");
+      setHandleOk(false); return false;
+    }
+    if (v.toLowerCase() === user.handle.toLowerCase()) {
+      setHandleError(""); setHandleOk(false); return false;
+    }
+    setHandleError(""); setHandleOk(true); return true;
+  };
+
+  const saveHandle = () => {
+    const v = editField.value.startsWith("@") ? editField.value : "@" + editField.value;
+    if (!validateHandle(v)) return;
+    setUser(u => ({ ...u, handle: v.toLowerCase() }));
+    setEditField(null); setHandleError(""); setHandleOk(false);
+  };
 
   const S_BORDER = { borderBottom: `1px solid ${C.border}` };
   const chevron = <span style={{ color: C.dim, fontSize: 12 }}>›</span>;
 
   const sections = [
-    { key: "account",      icon: "◎", label: "계정 관리",       sub: user.email },
-    { key: "privacy",      icon: "◈", label: "공개 범위",        sub: settings.privacy === "public" ? "전체 공개" : settings.privacy === "followers" ? "팔로워만" : "비공개" },
+    { key: "account",      icon: "◎", label: "계정 관리",       sub: user.handle },
     { key: "notification", icon: "◉", label: "알림 설정",        sub: settings.reminderOn ? `매일 ${settings.reminderTime}` : "꺼짐" },
     { key: "app",          icon: "⌘", label: "앱 설정",          sub: "캘린더 · 시간 · 언어" },
     { key: "palette",      icon: "✦", label: "팔레트 설정",      sub: "애니메이션 · 크기" },
@@ -1208,7 +1358,7 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
     { key: "info",         icon: "◌", label: "버전 정보 / 피드백", sub: "v0.1.0-beta" },
   ];
 
-  const back = () => setSection(null);
+  const back = () => { setSection(null); setHandleError(""); setHandleOk(false); setEditField(null); };
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 250, background: "rgba(0,0,0,0.6)", backdropFilter: "blur(8px)", display: "flex", alignItems: "flex-end" }}>
@@ -1239,11 +1389,10 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
 
           {/* 계정 관리 */}
           {section === "account" && (<>
+            {/* 이름, 이메일 */}
             {[
-              { key: "name", label: "이름", val: user.name },
-              { key: "handle", label: "핸들", val: user.handle },
+              { key: "name",  label: "이름",  val: user.name },
               { key: "email", label: "이메일", val: user.email },
-              { key: "bio", label: "소개", val: user.bio },
             ].map(f => (
               <div key={f.key} style={{ padding: "14px 0", borderBottom: `1px solid ${C.border}` }}>
                 <div style={{ fontSize: 10, color: C.muted, marginBottom: 6, letterSpacing: "0.06em" }}>{f.label}</div>
@@ -1254,35 +1403,52 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
                       <button onClick={() => { setUser(u => ({ ...u, [f.key]: editField.value })); setEditField(null); }} style={{ padding: "8px 14px", background: C.text, color: C.bg, border: "none", borderRadius: radius.sm, cursor: "pointer", fontSize: 12, fontWeight: 700, fontFamily: "inherit" }}>저장</button>
                     </div>
                   : <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: 14, color: C.text }}>{f.val}</span>
+                      <span style={{ fontSize: 14, color: C.text }}>{f.val || <span style={{ color: C.dim }}>미입력</span>}</span>
                       <button onClick={() => setEditField({ key: f.key, value: f.val })} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>변경</button>
                     </div>
                 }
               </div>
             ))}
+
+            {/* 핸들 — 별도 검증 UI */}
+            <div style={{ padding: "14px 0", borderBottom: `1px solid ${C.border}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <div style={{ fontSize: 10, color: C.muted, letterSpacing: "0.06em" }}>고유 아이디 (핸들)</div>
+                <div style={{ fontSize: 9, color: C.dim }}>팀 초대 시 사용돼요</div>
+              </div>
+              {editField?.key === "handle"
+                ? <>
+                    <div style={{ position: "relative", marginBottom: 6 }}>
+                      <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", fontSize: 13, color: C.dim, pointerEvents: "none" }}>@</span>
+                      <input
+                        value={editField.value.startsWith("@") ? editField.value.slice(1) : editField.value}
+                        onChange={e => {
+                          const v = e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "");
+                          setEditField(ef => ({ ...ef, value: v }));
+                          validateHandle("@" + v);
+                        }}
+                        autoFocus maxLength={19}
+                        style={{ width: "100%", boxSizing: "border-box", background: C.card, border: `1px solid ${handleError ? "#ff6b6b" : handleOk ? "#5ce65c" : C.border2}`, borderRadius: radius.sm, padding: "9px 10px 9px 26px", color: C.text, fontSize: 13, outline: "none", fontFamily: "inherit", transition: "border-color 0.15s" }}
+                      />
+                      {handleOk && <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", fontSize: 12, color: "#5ce65c" }}>✓</span>}
+                    </div>
+                    {handleError && <div style={{ fontSize: 11, color: "#ff6b6b", marginBottom: 8 }}>{handleError}</div>}
+                    {handleOk && <div style={{ fontSize: 11, color: "#5ce65c", marginBottom: 8 }}>사용 가능한 아이디예요</div>}
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => { setEditField(null); setHandleError(""); setHandleOk(false); }} style={{ flex: 1, padding: "9px", background: "transparent", border: `1px solid ${C.border2}`, borderRadius: radius.sm, color: C.muted, cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>취소</button>
+                      <button onClick={saveHandle} disabled={!handleOk} style={{ flex: 2, padding: "9px", background: handleOk ? C.text : C.border2, color: handleOk ? C.bg : C.dim, border: "none", borderRadius: radius.sm, cursor: handleOk ? "pointer" : "default", fontSize: 12, fontWeight: 700, fontFamily: "inherit", transition: "all 0.15s" }}>저장</button>
+                    </div>
+                  </>
+                : <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 14, color: C.text, fontFamily: "monospace" }}>{user.handle}</span>
+                    <button onClick={() => { setEditField({ key: "handle", value: user.handle.slice(1) }); setHandleError(""); setHandleOk(false); }} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>변경</button>
+                  </div>
+              }
+            </div>
+
             <div style={{ marginTop: 24 }}>
               <button style={{ width: "100%", padding: "12px", background: "transparent", border: `1px solid #3a1a1a`, borderRadius: radius.md, color: "#ff7070", cursor: "pointer", fontSize: 13, fontFamily: "inherit" }}>계정 삭제</button>
             </div>
-          </>)}
-
-          {/* 공개 범위 */}
-          {section === "privacy" && (<>
-            <div style={{ fontSize: 12, color: C.muted, marginBottom: 14, lineHeight: 1.7 }}>내 할 일과 팔레트를 누가 볼 수 있는지 설정해요</div>
-            {[
-              { val: "public",    label: "전체 공개",  sub: "모든 사람이 볼 수 있어요" },
-              { val: "followers", label: "팔로워만",   sub: "팔로워만 볼 수 있어요" },
-              { val: "private",   label: "비공개",     sub: "나만 볼 수 있어요" },
-            ].map(opt => (
-              <div key={opt.val} onClick={() => updSetting("privacy", opt.val)} style={{ display: "flex", alignItems: "center", gap: 12, padding: "14px 0", borderBottom: `1px solid ${C.border}`, cursor: "pointer" }}>
-                <div style={{ width: 20, height: 20, borderRadius: "50%", border: `2px solid ${settings.privacy === opt.val ? "#6c8fff" : C.border2}`, background: settings.privacy === opt.val ? "#6c8fff" : "transparent", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                  {settings.privacy === opt.val && <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#fff" }} />}
-                </div>
-                <div>
-                  <div style={{ fontSize: 13, color: C.text }}>{opt.label}</div>
-                  <div style={{ fontSize: 11, color: C.muted, marginTop: 2 }}>{opt.sub}</div>
-                </div>
-              </div>
-            ))}
           </>)}
 
           {/* 알림 설정 */}
@@ -1310,9 +1476,6 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
             </SettingRow>
             <SettingRow label="캘린더 시작 요일" sub="일요일부터 시작">
               <Toggle on={settings.calStartSunday} onChange={v => updSetting("calStartSunday", v)} />
-            </SettingRow>
-            <SettingRow label="24시간 표기" sub="오후 2시 → 14:00">
-              <Toggle on={settings.use24h} onChange={v => updSetting("use24h", v)} />
             </SettingRow>
             <SettingRow label="언어" sub="Language">
               <div style={{ display: "flex", gap: 6 }}>
@@ -1423,7 +1586,7 @@ function SettingsSheet({ settings, updSetting, user, setUser, onClose }) {
   );
 }
 
-function MyPageScreen({ paletteHistory, todosByDate, cats, ruts, user, setUser, settings, updSetting, friends, onTabChange }) {
+function MyPageScreen({ paletteHistory, todosByDate, cats, ruts, user, setUser, settings, updSetting, onTabChange }) {
   const [showSettings, setShowSettings] = useState(false);
   const now   = new Date();
   const year  = now.getFullYear();
@@ -1510,20 +1673,13 @@ function MyPageScreen({ paletteHistory, todosByDate, cats, ruts, user, setUser, 
         </div>
 
         {/* 소개 */}
-        {user.bio && <div style={{ fontSize: 13, color: C.muted, lineHeight: 1.6, marginBottom: 16 }}>{user.bio}</div>}
-
-        {/* 팔로워 / 팔로잉 */}
+        
+        {/* BLACK 달성 수 */}
         <div style={{ display: "flex", gap: 24 }}>
-          {[
-            { label: "팔로워", value: user.followers, onClick: null },
-            { label: "팔로잉", value: friends?.length ?? user.following, onClick: () => onTabChange?.("search") },
-            { label: "BLACK",  value: blackDays.length, onClick: null },
-          ].map(({ label, value, onClick }) => (
-            <div key={label} onClick={onClick} style={{ textAlign:"center", cursor: onClick ? "pointer" : "default" }}>
-              <div style={{ fontSize: 18, fontWeight: 700 }}>{value}</div>
-              <div style={{ fontSize: 10, color: onClick ? C.muted : C.dim, marginTop: 2, letterSpacing: "0.06em", textDecoration: onClick ? "underline" : "none", textUnderlineOffset: 3 }}>{label}</div>
-            </div>
-          ))}
+          <div style={{ textAlign:"center" }}>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>{blackDays.length}</div>
+            <div style={{ fontSize: 10, color: C.dim, marginTop: 2, letterSpacing: "0.06em" }}>BLACK</div>
+          </div>
         </div>
       </div>
 
@@ -1624,10 +1780,23 @@ const MEMBER_HUE_PALETTE = [
   { hue: 340, label: "핑크",   base: "#ef476f" },
 ];
 
-function getMemberColor(idx) {
-  const p = MEMBER_HUE_PALETTE[idx % MEMBER_HUE_PALETTE.length];
+// colorIdx로 색 가져오기 (멤버 객체에 colorIdx 필드 저장)
+function getMemberColor(colorIdx) {
+  const p = MEMBER_HUE_PALETTE[colorIdx % MEMBER_HUE_PALETTE.length];
   const rgb = hslToRgb(p.hue, 78, 58);
   return { ...p, rgb, color: `hsl(${p.hue},78%,58%)` };
+}
+
+// 팀에서 특정 멤버의 색 가져오기 (handle 기반)
+function getMemberColorByHandle(members, handle) {
+  const m = members.find(x => x.handle === handle);
+  const idx = m?.colorIdx ?? members.findIndex(x => x.handle === handle);
+  return getMemberColor(idx >= 0 ? idx : 0);
+}
+
+// 이미 사용 중인 colorIdx 목록
+function usedColorIdxs(members) {
+  return members.map((m, i) => m.colorIdx ?? i);
 }
 
 // 팀 팔레트 Canvas — 멤버별 고유색으로 drop 렌더
@@ -1676,12 +1845,137 @@ function CreateTeamModal({ myHandle, onClose, onCreate }) {
   );
 }
 
+// 멤버 색 선택 모달
+function ColorPickerModal({ team, myHandle, onClose, onSelect }) {
+  const myMember   = team.members.find(m => m.handle === myHandle);
+  const myColorIdx = myMember?.colorIdx ?? team.members.findIndex(m => m.handle === myHandle);
+  const takenIdxs  = team.members
+    .filter(m => m.handle !== myHandle)
+    .map(m => m.colorIdx ?? team.members.indexOf(m));
+
+  // 원형 배치 계산 — 8개를 360도에 균등 배치, 위쪽(-90도)에서 시작
+  const R = 88; // 원 반지름(px)
+  const CENTER = 112; // 컨테이너 중심
+  const positions = MEMBER_HUE_PALETTE.map((_, i) => {
+    const angle = (i / 8) * 2 * Math.PI - Math.PI / 2;
+    return { x: CENTER + R * Math.cos(angle), y: CENTER + R * Math.sin(angle) };
+  });
+
+  return (
+    <Modal onClose={onClose} title="내 색 선택">
+      <div style={{ fontSize: 11, color: C.muted, marginBottom: 4, lineHeight: 1.6, textAlign:"center" }}>
+        다른 멤버가 쓰는 색은 선택할 수 없어요
+      </div>
+
+      {/* 원형 배치 컨테이너 */}
+      <div style={{ position:"relative", width: CENTER*2, height: CENTER*2, margin:"0 auto 8px" }}>
+        {/* 중앙 — 현재 선택 색 미리보기 */}
+        <div style={{
+          position:"absolute", left:"50%", top:"50%",
+          transform:"translate(-50%,-50%)",
+          width:52, height:52, borderRadius:"50%",
+          background: getMemberColor(myColorIdx).base,
+          boxShadow: `0 0 24px ${getMemberColor(myColorIdx).base}88, 0 0 0 3px ${C.bg}, 0 0 0 5px ${getMemberColor(myColorIdx).base}44`,
+          display:"flex", alignItems:"center", justifyContent:"center",
+          fontSize:10, fontWeight:700, color:"#000",
+          transition:"background 0.25s, box-shadow 0.25s",
+        }}>
+          <div style={{ textAlign:"center", lineHeight:1.3 }}>
+            <div style={{ fontSize:9, opacity:0.7 }}>현재</div>
+            <div style={{ fontSize:10, fontWeight:800 }}>{getMemberColor(myColorIdx).label}</div>
+          </div>
+        </div>
+
+        {/* 원형으로 색 배치 */}
+        {MEMBER_HUE_PALETTE.map((p, idx) => {
+          const isMine  = idx === myColorIdx;
+          const isTaken = takenIdxs.includes(idx);
+          const mc      = getMemberColor(idx);
+          const takenBy = isTaken ? team.members.find((m,i) => (m.colorIdx ?? i) === idx) : null;
+          const { x, y } = positions[idx];
+          const size = isMine ? 44 : 38;
+
+          return (
+            <div key={idx}
+              onClick={() => !isTaken && onSelect(idx)}
+              title={isTaken ? `${takenBy?.name || ""}이(가) 사용 중` : p.label}
+              style={{
+                position:"absolute",
+                left: x, top: y,
+                transform:"translate(-50%,-50%)",
+                width: size, height: size,
+                borderRadius:"50%",
+                background: isTaken ? C.card : mc.base + (isMine ? "ff" : "cc"),
+                border: `${isMine ? 3 : 2}px solid ${isMine ? mc.base : isTaken ? C.border2 : mc.base+"88"}`,
+                boxShadow: isMine
+                  ? `0 0 16px ${mc.base}88, 0 0 0 3px ${C.bg}, 0 0 0 5px ${mc.base}`
+                  : isTaken ? "none"
+                  : `0 2px 8px ${mc.base}44`,
+                cursor: isTaken ? "not-allowed" : "pointer",
+                opacity: isTaken ? 0.35 : 1,
+                display:"flex", alignItems:"center", justifyContent:"center",
+                flexDirection:"column", gap:1,
+                transition:"all 0.18s",
+              }}>
+              {isTaken
+                ? <span style={{ fontSize:10, color:C.dim, fontWeight:700 }}>{takenBy?.name?.[0]}</span>
+                : <>
+                    <div style={{ width:isMine?18:14, height:isMine?18:14, borderRadius:"50%", background:"rgba(0,0,0,0.25)" }}/>
+                  </>
+              }
+            </div>
+          );
+        })}
+
+        {/* 연결선 (장식) */}
+        <svg style={{ position:"absolute", inset:0, width:"100%", height:"100%", pointerEvents:"none" }}>
+          {MEMBER_HUE_PALETTE.map((p, idx) => {
+            const mc = getMemberColor(idx);
+            const isTaken = takenIdxs.includes(idx);
+            const isMine  = idx === myColorIdx;
+            const { x, y } = positions[idx];
+            return (
+              <line key={idx}
+                x1={CENTER} y1={CENTER} x2={x} y2={y}
+                stroke={isMine ? mc.base : isTaken ? C.border : mc.base+"33"}
+                strokeWidth={isMine ? 1.5 : 0.8}
+                strokeDasharray={isTaken ? "3 3" : undefined}
+              />
+            );
+          })}
+        </svg>
+      </div>
+
+      {/* 색 이름 라벨 */}
+      <div style={{ display:"flex", justifyContent:"center", flexWrap:"wrap", gap:6, marginBottom:18 }}>
+        {MEMBER_HUE_PALETTE.map((p, idx) => {
+          const isMine  = idx === myColorIdx;
+          const isTaken = takenIdxs.includes(idx);
+          const mc      = getMemberColor(idx);
+          return (
+            <span key={idx} onClick={() => !isTaken && onSelect(idx)} style={{
+              fontSize:10, padding:"3px 10px", borderRadius:radius.full, cursor:isTaken?"not-allowed":"pointer",
+              background: isMine ? mc.base+"22" : "transparent",
+              border: `1px solid ${isMine ? mc.base : isTaken ? C.border : C.border2}`,
+              color: isMine ? mc.base : isTaken ? C.dim : C.muted,
+              opacity: isTaken ? 0.4 : 1,
+              fontWeight: isMine ? 700 : 400,
+              transition:"all 0.15s",
+            }}>{p.label}</span>
+          );
+        })}
+      </div>
+
+      <button onClick={onClose} style={{ width:"100%", padding:"11px", background:"transparent", border:`1px solid ${C.border2}`, borderRadius:radius.md, color:C.muted, cursor:"pointer", fontFamily:"inherit", fontSize:13 }}>닫기</button>
+    </Modal>
+  );
+}
+
 // 멤버 초대 모달
-function InviteModal({ team, onClose, onInvite, friends }) {
+function InviteModal({ team, onClose, onInvite, onCancelInvite }) {
   const [handle, setHandle] = useState("");
   const alreadyMember = (h) => team.members.some(m => m.handle === h);
-  // 친구 중 아직 팀 멤버가 아닌 사람
-  const invitableFriends = (friends || []).filter(f => !alreadyMember(f.handle));
+  const pending = team.pendingInvites || [];
   return (
     <Modal onClose={onClose} title="멤버 초대">
       {/* 아이디 직접 입력 */}
@@ -1694,24 +1988,28 @@ function InviteModal({ team, onClose, onInvite, friends }) {
         <button onClick={() => handle.trim() && onInvite(handle.trim())}
           style={{ padding: "10px 16px", background: C.text, border: "none", borderRadius: radius.sm, color: C.bg, cursor: "pointer", fontWeight: 700, fontFamily: "inherit" }}>초대</button>
       </div>
-      {/* 팔로잉 친구 목록 */}
-      {invitableFriends.length > 0 && (<>
-        <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>팔로잉에서 초대</div>
-        {invitableFriends.map((f, i) => (
-          <div key={f.handle} style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 0", borderBottom:`1px solid ${C.border}` }}>
-            <div style={{ width:32, height:32, borderRadius:"50%", background:`linear-gradient(135deg,hsl(${(f.handle.length*37)%360},60%,55%),hsl(${(f.handle.length*67)%360},60%,45%))`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:700, color:"#fff" }}>{f.name[0]}</div>
-            <div style={{ flex:1 }}>
-              <div style={{ fontSize:13, color:C.text }}>{f.name}</div>
-              <div style={{ fontSize:10, color:C.muted }}>{f.handle}</div>
+
+      {/* 수락 대기 중 */}
+      {pending.length > 0 && (<>
+        <div style={{ fontSize: 11, color: C.muted, margin: "0 0 10px" }}>수락 대기 중 {pending.length}명</div>
+        {pending.map(p => (
+          <div key={p.handle} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+            <div style={{ width: 28, height: 28, borderRadius: "50%", background: C.border2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: C.muted }}>?</div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: C.text }}>{p.handle}</div>
+              <div style={{ fontSize: 10, color: C.muted, marginTop: 1 }}>초대 대기 중</div>
             </div>
-            <button onClick={() => onInvite(f.handle)} style={{ padding:"6px 12px", background:C.text, border:"none", borderRadius:radius.full, color:C.bg, cursor:"pointer", fontSize:11, fontWeight:700, fontFamily:"inherit" }}>초대</button>
+            <button onClick={() => onCancelInvite(p.handle)}
+              style={{ padding: "5px 10px", background: "transparent", border: `1px solid ${C.border2}`, borderRadius: radius.full, color: C.dim, cursor: "pointer", fontSize: 11, fontFamily: "inherit" }}>취소</button>
           </div>
         ))}
+        <div style={{ height: 12 }} />
       </>)}
+
       {/* 현재 멤버 */}
-      <div style={{ fontSize: 11, color: C.muted, margin: "16px 0 10px" }}>현재 멤버 {team.members.length}명</div>
+      <div style={{ fontSize: 11, color: C.muted, margin: "0 0 10px" }}>현재 멤버 {team.members.length}명</div>
       {team.members.map((m, i) => {
-        const mc = getMemberColor(i);
+        const mc = getMemberColor(m.colorIdx ?? i);
         return (
           <div key={m.handle} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
             <div style={{ width: 28, height: 28, borderRadius: "50%", background: mc.base + "33", border: `1.5px solid ${mc.base}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: mc.base }}>{m.name[0]}</div>
@@ -1728,35 +2026,40 @@ function InviteModal({ team, onClose, onInvite, friends }) {
 }
 
 // 팀 상세 화면
-function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDelete, friends }) {
+function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDelete, onKick, onAcceptJoin, onRejectJoin, selectedDate, setSelectedDate, blackShownDates }) {
   const [activeTab, setActiveTab]     = useState("todo");   // "todo" | "calendar"
-  const [selectedDate, setSelectedDate] = useState(getTodayKey);
   const [showCal, setShowCal]         = useState(false);
   const [calClosing, setCalClosing]   = useState(false);
-  const [viewMonth, setViewMonth]     = useState(() => { const d=new Date(); return {y:d.getFullYear(),m:d.getMonth()}; });
+  const [viewMonth, setViewMonth]     = useState(() => { const d = new Date(selectedDate + "T00:00:00"); return {y:d.getFullYear(),m:d.getMonth()}; });
   const [addingCat, setAddingCat]     = useState(false);
   const [newCatName, setNewCatName]   = useState("");
   const [addingTo, setAddingTo]       = useState(null);
   const [newTodo, setNewTodo]         = useState("");
+  const [assignee, setAssignee]       = useState(null); // handle | null(= 자신)
   const [blackPhase, setBlackPhase]   = useState(null);
   const [flyOrb, setFlyOrb]           = useState(null);
   const [stampDate, setStampDate]     = useState(null);
   const [canvasVer, setCanvasVer]     = useState(0);
   const [animDrop, setAnimDrop]       = useState(null);
+  // blackShownDates는 TeamScreen에서 prop으로 받음 — 재마운트 시에도 유지
   const [showInvite, setShowInvite]   = useState(false);
   const [showMenu, setShowMenu]       = useState(false);
+  const [showColorPicker, setShowColorPicker] = useState(false);
+  const [inviteToast, setInviteToast] = useState(null);
   const [confirmAction, setConfirmAction] = useState(null);
   const [editingTeam, setEditingTeam]   = useState(false);
   const [editName, setEditName]         = useState(team.name);
   const [editDesc, setEditDesc]         = useState(team.desc||'');
+  const [kickConfirm, setKickConfirm]   = useState(null); // 추방 확인 중인 handle
   const inputRef   = useRef(null);
   const blackTimer = useRef(null);
   const targetCellRef = useRef(null);
   const [todayKey] = useState(getTodayKey);
 
   const myIdx   = team.members.findIndex(m => m.handle === myHandle);
-  const myColor = getMemberColor(myIdx >= 0 ? myIdx : 0);
-  const isOwner = myIdx === 0; // 첫번째 멤버가 팀장
+  const myMember = team.members[myIdx >= 0 ? myIdx : 0];
+  const myColor = getMemberColor(myMember?.colorIdx ?? (myIdx >= 0 ? myIdx : 0));
+  const isOwner = myIdx === 0;
 
   // 날짜별 팀 할일 가져오기
   const getTeamTodosForDate = (dk) => {
@@ -1796,10 +2099,14 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
   // 선택된 날짜 변경 시 BLACK 초기화
   useEffect(() => { setBlackPhase(null); clearTimeout(blackTimer.current); setCanvasVer(v => v+1); }, [selectedDate]);
 
-  // BLACK 달성 시퀀스
+  // BLACK 달성 시퀀스 — 날짜별 1회 보장 (blackShownDates는 TeamScreen에서 관리)
   useEffect(() => {
-    if (isBlack && blackPhase === null) {
-      if (!settings?.blackAnimationOn) return;
+    if (isBlack && blackPhase === null && !blackShownDates.current.has(`${team.id}:${selectedDate}:${totalCount}`)) {
+      if (!settings?.blackAnimationOn) {
+        blackShownDates.current.add(`${team.id}:${selectedDate}:${totalCount}`);
+        return;
+      }
+      blackShownDates.current.add(`${team.id}:${selectedDate}:${totalCount}`);
       setBlackPhase("in");
       clearTimeout(blackTimer.current);
       blackTimer.current = setTimeout(() => {
@@ -1822,7 +2129,7 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
         }, 150);
       }, 1000);
     }
-  }, [isBlack]);
+  }, [isBlack, totalCount]);
 
   const closeCalendar = (cb) => {
     setCalClosing(true);
@@ -1848,11 +2155,17 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
 
   // 할일 추가
   const addTodo = (catId) => {
-    if (!newTodo.trim()) { setAddingTo(null); return; }
+    if (!newTodo.trim()) { setAddingTo(null); setAssignee(null); return; }
+    // 담당자: assignee가 지정됐으면 그 멤버, 아니면 나
+    const targetHandle = assignee || myHandle;
+    const targetMember = team.members.find(m => m.handle === targetHandle) || team.members[myIdx >= 0 ? myIdx : 0];
+    const targetIdx    = team.members.findIndex(m => m.handle === targetHandle);
+    const ac           = getMemberColor(targetMember?.colorIdx ?? (targetIdx >= 0 ? targetIdx : 0));
     const todo = {
       id: uid(), text: newTodo.trim(), done: false,
-      author: myHandle, authorName: team.members[myIdx >= 0 ? myIdx : 0]?.name || "나",
-      color: myColor.color, rgb: myColor.rgb, hue: myColor.hue,
+      author: myHandle, authorName: myMember?.name || "나",
+      assignee: targetHandle, assigneeName: targetMember?.name || targetHandle,
+      color: ac.color, rgb: ac.rgb, hue: ac.hue,
       px: 0.12 + Math.random()*0.76, py: 0.12 + Math.random()*0.76,
       seed: uid()*19, createdAt: Date.now(),
     };
@@ -1860,7 +2173,8 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
     const base = team.todosByDate?.[dk] || {};
     const catList = base[catId] || [];
     onUpdate({ ...team, todosByDate: { ...(team.todosByDate||{}), [dk]: { ...base, [catId]: [...catList, todo] } } });
-    setNewTodo(""); setAddingTo(null);
+    setCanvasVer(v => v+1); // totalCount 증가 → BLACK 오버레이 즉시 해제
+    setNewTodo(""); setAddingTo(null); setAssignee(null);
   };
 
   // 완료 토글
@@ -1875,16 +2189,24 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
 
     const prevHist = (team.paletteHistory||{})[dk] || { drops:[], total:0 };
     const syncTotal = allTodos.length;
-    let newDrops, newAnimDrop = null;
+    let newDrops;
     if (willDone) {
       if (prevHist.drops.some(d => d.id===todoId)) { onUpdate({...team, todosByDate: newTodosByDate}); return; }
-      const drop = { id: todoId, rgb: todo.rgb, hue: todo.hue, color: todo.color, px: todo.px, py: todo.py, seed: todo.seed };
+      const ownerHandle = todo.assignee || todo.author;
+      const ownerMember = team.members.find(m => m.handle === ownerHandle);
+      const ownerIdx    = team.members.findIndex(m => m.handle === ownerHandle);
+      const ac = getMemberColor(ownerMember?.colorIdx ?? (ownerIdx >= 0 ? ownerIdx : 0));
+      // 마지막 완료인지 판별 — 애니메이션용 isLast 플래그
+      const remainingUndone = allTodos.filter(t => !t.done && t.id !== todoId).length;
+      const isLast = remainingUndone === 0 && syncTotal > 0;
+      const drop = { id: todoId, rgb: ac.rgb, hue: ac.hue, color: ac.color, px: todo.px, py: todo.py, seed: todo.seed, isLast };
       newDrops = [...prevHist.drops, drop];
-      newAnimDrop = drop;
       setAnimDrop(drop);
     } else {
       newDrops = prevHist.drops.filter(d => d.id !== todoId);
       setBlackPhase(null); clearTimeout(blackTimer.current);
+      // 취소 시 blackShownDates key 제거 → 재완료 시 BLACK 애니메이션 재생
+      blackShownDates.current.delete(`${team.id}:${dk}:${syncTotal}`);
     }
     setCanvasVer(v => v+1);
     const newPalHist = { ...(team.paletteHistory||{}), [dk]: { drops: newDrops, total: syncTotal } };
@@ -1906,9 +2228,46 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
   };
 
   const inviteMember = (handle) => {
-    if (team.members.some(m => m.handle === handle)) return;
-    onUpdate({ ...team, members: [...team.members, { handle, name: handle.replace("@",""), avatar:"" }] });
+    const h = handle.startsWith("@") ? handle : "@" + handle;
+    if (team.members.some(m => m.handle === h)) return;
+    if ((team.pendingInvites || []).some(p => p.handle === h)) return;
+    // 정원 8명 체크 (현재 멤버 + 대기 인원 합산)
+    if (team.members.length + (team.pendingInvites||[]).length >= 8) {
+      setInviteToast("팀 정원(8명)이 꽉 찼어요");
+      setTimeout(() => setInviteToast(null), 2500);
+      setShowInvite(false);
+      return;
+    }
+    const invite = { handle: h, name: h.replace("@",""), invitedAt: Date.now() };
+    onUpdate({ ...team, pendingInvites: [...(team.pendingInvites || []), invite] });
     setShowInvite(false);
+    setInviteToast(h + "에게 초대를 보냈어요");
+    setTimeout(() => setInviteToast(null), 2500);
+  };
+
+  const cancelInvite = (handle) => {
+    onUpdate({ ...team, pendingInvites: (team.pendingInvites || []).filter(p => p.handle !== handle) });
+  };
+
+  // 내 고유 색 변경
+  const changeMyColor = (colorIdx) => {
+    const newMembers = team.members.map(m =>
+      m.handle === myHandle ? { ...m, colorIdx } : m
+    );
+    onUpdate({ ...team, members: newMembers });
+    setShowColorPicker(false);
+  };
+
+  // 프로토타입 전용: 초대 수락 시뮬레이션 (실제 서비스에서는 상대방이 앱에서 수락)
+  const acceptInvite = (handle) => {
+    const pending = (team.pendingInvites || []);
+    const invite  = pending.find(p => p.handle === handle);
+    if (!invite) return;
+    onUpdate({
+      ...team,
+      members: [...team.members, { handle: invite.handle, name: invite.name, avatar: "" }],
+      pendingInvites: pending.filter(p => p.handle !== handle),
+    });
   };
 
   // 캘린더 계산
@@ -1927,6 +2286,28 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
 
   return (
     <div style={{ height:"100vh", background:C.bg, color:C.text, fontFamily:"system-ui,sans-serif", display:"flex", flexDirection:"column", overflow:"hidden" }}>
+
+      {/* 초대 발송 토스트 */}
+      {inviteToast && (
+        <div style={{ position:"fixed", top:20, left:"50%", transform:"translateX(-50%)", zIndex:400, background:"#1a1a1a", border:`1px solid ${C.border2}`, borderRadius:radius.full, padding:"10px 20px", fontSize:12, color:C.text, whiteSpace:"nowrap", boxShadow:"0 4px 24px rgba(0,0,0,0.5)", animation:"fadeIn 0.2s ease" }}>
+          {inviteToast}
+        </div>
+      )}
+
+      {/* 수락 대기 배너 (프로토타입: 수락 버튼으로 시뮬레이션) */}
+      {(team.pendingInvites||[]).length > 0 && (
+        <div style={{ background:"#151a10", borderBottom:`1px solid #2a3a1a`, padding:"10px 18px", flexShrink:0 }}>
+          <div style={{ fontSize:10, color:"#6a9a3a", marginBottom:6, letterSpacing:"0.06em" }}>수락 대기 중 — 프로토타입에서는 아래 버튼으로 시뮬레이션</div>
+          <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+            {(team.pendingInvites||[]).map(p => (
+              <button key={p.handle} onClick={() => acceptInvite(p.handle)}
+                style={{ padding:"5px 12px", background:"#1e2e12", border:"1px solid #4a7a22", borderRadius:radius.full, color:"#8aba44", cursor:"pointer", fontSize:11, fontFamily:"inherit" }}>
+                {p.handle} 수락 ✓
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* BLACK 오버레이 */}
       {blackPhase && (
@@ -2057,22 +2438,104 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
         {/* 팀 정보 수정 */}
         {editingTeam && (
           <div style={{ background:C.surface, border:`1px solid ${C.border2}`, borderRadius:radius.md, padding:"14px", marginBottom:10 }}>
-            <div style={{ fontSize:11, color:C.muted, marginBottom:8 }}>팀 이름</div>
+            <div style={{ fontSize:13, fontWeight:700, color:C.text, marginBottom:14 }}>팀 정보 수정</div>
+            <div style={{ fontSize:11, color:C.muted, marginBottom:6 }}>팀 이름</div>
             <input value={editName} onChange={e=>setEditName(e.target.value)} style={{ width:"100%", boxSizing:"border-box", background:C.card, border:`1px solid ${C.border2}`, borderRadius:radius.sm, padding:"9px 12px", color:C.text, fontSize:13, outline:"none", fontFamily:"inherit", marginBottom:10 }}/>
-            <div style={{ fontSize:11, color:C.muted, marginBottom:8 }}>설명</div>
-            <input value={editDesc} onChange={e=>setEditDesc(e.target.value)} placeholder="팀 설명 (선택)" style={{ width:"100%", boxSizing:"border-box", background:C.card, border:`1px solid ${C.border2}`, borderRadius:radius.sm, padding:"9px 12px", color:C.text, fontSize:13, outline:"none", fontFamily:"inherit", marginBottom:12 }}/>
+            <div style={{ fontSize:11, color:C.muted, marginBottom:6 }}>설명</div>
+            <input value={editDesc} onChange={e=>setEditDesc(e.target.value)} placeholder="팀 설명 (선택)" style={{ width:"100%", boxSizing:"border-box", background:C.card, border:`1px solid ${C.border2}`, borderRadius:radius.sm, padding:"9px 12px", color:C.text, fontSize:13, outline:"none", fontFamily:"inherit", marginBottom:16 }}/>
+
+            {/* 멤버 관리 (팀장만) */}
+            <div style={{ fontSize:11, color:C.muted, marginBottom:10 }}>멤버 관리 ({team.members.length}/8)</div>
+            <div style={{ display:"flex", flexDirection:"column", gap:6, marginBottom:16 }}>
+              {team.members.map((m, i) => {
+                const mc = getMemberColor(m.colorIdx ?? i);
+                const isMe = m.handle === myHandle;
+                return (
+                  <div key={m.handle} style={{ display:"flex", alignItems:"center", gap:10, padding:"8px 10px", background:C.card, borderRadius:radius.sm, border:`1px solid ${C.border}` }}>
+                    <div style={{ width:26, height:26, borderRadius:"50%", background:mc.base+"22", border:`1.5px solid ${mc.base}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, fontWeight:700, color:mc.base, flexShrink:0 }}>{m.name[0]}</div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:12, color:C.text, fontWeight:isMe?700:400 }}>{m.name}{isMe && <span style={{ fontSize:10, color:C.dim, fontWeight:400 }}> (나)</span>}</div>
+                      <div style={{ fontSize:10, color:C.dim }}>{m.handle}</div>
+                    </div>
+                    {i === 0 && <span style={{ fontSize:9, color:C.dim, background:C.surface, padding:"2px 7px", borderRadius:4, flexShrink:0 }}>팀장</span>}
+                    {isMe && i !== 0 && <span style={{ fontSize:9, color:C.dim, flexShrink:0 }}>나</span>}
+                    {!isMe && i !== 0 && (
+                      <button onClick={() => {
+                        if (kickConfirm === m.handle) {
+                          onKick(team.id, m.handle);
+                          setKickConfirm(null);
+                        } else {
+                          setKickConfirm(m.handle);
+                        }
+                      }}
+                        style={{ padding:"4px 10px", borderRadius:radius.full, cursor:"pointer", fontSize:11, fontFamily:"inherit", flexShrink:0, fontWeight:kickConfirm===m.handle?700:400,
+                          background: kickConfirm===m.handle ? "#ff4444" : "transparent",
+                          border: `1px solid ${kickConfirm===m.handle ? "#ff4444" : C.border2}`,
+                          color: kickConfirm===m.handle ? "#fff" : C.dim,
+                          transition: "all 0.15s",
+                        }}>
+                        {kickConfirm===m.handle ? "확인" : "추방"}
+                      </button>
+                    )}
+                    {kickConfirm === m.handle && (
+                      <button onClick={() => setKickConfirm(null)}
+                        style={{ padding:"4px 8px", borderRadius:radius.full, cursor:"pointer", fontSize:11, fontFamily:"inherit", background:"transparent", border:`1px solid ${C.border2}`, color:C.dim }}>취소</button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+
             <div style={{ display:"flex", gap:8 }}>
-              <button onClick={()=>setEditingTeam(false)} style={{ flex:1, padding:"9px", background:"transparent", border:`1px solid ${C.border2}`, borderRadius:radius.sm, color:C.muted, cursor:"pointer", fontFamily:"inherit", fontSize:12 }}>취소</button>
-              <button onClick={()=>{ if(editName.trim()) onUpdate({...team, name:editName.trim(), desc:editDesc.trim()}); setEditingTeam(false); }} style={{ flex:1, padding:"9px", background:C.text, border:"none", borderRadius:radius.sm, color:C.bg, cursor:"pointer", fontWeight:700, fontFamily:"inherit", fontSize:12 }}>저장</button>
+              <button onClick={()=>{ setEditingTeam(false); setKickConfirm(null); }} style={{ flex:1, padding:"9px", background:"transparent", border:`1px solid ${C.border2}`, borderRadius:radius.sm, color:C.muted, cursor:"pointer", fontFamily:"inherit", fontSize:12 }}>닫기</button>
+              <button onClick={()=>{ if(editName.trim()) onUpdate({...team, name:editName.trim(), desc:editDesc.trim()}); setEditingTeam(false); setKickConfirm(null); }} style={{ flex:1, padding:"9px", background:C.text, border:"none", borderRadius:radius.sm, color:C.bg, cursor:"pointer", fontWeight:700, fontFamily:"inherit", fontSize:12 }}>저장</button>
             </div>
           </div>
         )}
 
-        {/* 멤버 아바타 */}
-        <div style={{ display:"flex", gap:6, marginBottom:12 }}>
+        {/* 팀 코드 */}
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+          <span style={{ fontSize:10, color:C.dim }}>팀 코드</span>
+          <span style={{ fontSize:12, color:C.muted, fontFamily:"monospace", letterSpacing:"0.15em", background:C.card, padding:"3px 10px", borderRadius:radius.full, border:`1px solid ${C.border}` }}>#{team.teamCode||"------"}</span>
+          <span style={{ fontSize:10, color:C.dim }}>— 이 코드로 팀에 참여할 수 있어요</span>
+        </div>
+
+        {/* 참여요청 목록 (팀장만) */}
+        {isOwner && (team.joinRequests||[]).length > 0 && (
+          <div style={{ background:"#0e1a10", border:"1px solid #2a4a2a", borderRadius:radius.md, padding:"12px 14px", marginBottom:12 }}>
+            <div style={{ fontSize:10, color:"#5ce65c", marginBottom:10, letterSpacing:"0.06em" }}>참여 요청 {(team.joinRequests||[]).length}명</div>
+            {(team.joinRequests||[]).map(req => (
+              <div key={req.handle} style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+                <div style={{ width:26, height:26, borderRadius:"50%", background:C.border2, display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:C.muted }}>{req.name[0]}</div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:13, color:C.text }}>{req.name}</div>
+                  <div style={{ fontSize:10, color:C.dim }}>{req.handle}</div>
+                </div>
+                <button onClick={()=>onAcceptJoin(team.id, req.handle)}
+                  style={{ padding:"5px 12px", background:"#1e3a1e", border:"1px solid #4a8a4a", borderRadius:radius.full, color:"#5ce65c", cursor:"pointer", fontSize:11, fontFamily:"inherit", fontWeight:700 }}>수락</button>
+                <button onClick={()=>onRejectJoin(team.id, req.handle)}
+                  style={{ padding:"5px 10px", background:"transparent", border:`1px solid ${C.border2}`, borderRadius:radius.full, color:C.dim, cursor:"pointer", fontSize:11, fontFamily:"inherit" }}>거절</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* 멤버 아바타 — 내 아바타 클릭 시 색 변경 */}
+        <div style={{ display:"flex", gap:8, marginBottom:12, alignItems:"center", flexWrap:"wrap" }}>
           {team.members.map((m,i)=>{
-            const mc=getMemberColor(i);
-            return <div key={m.handle} title={`${m.name} — ${mc.label}`} style={{ width:28,height:28,borderRadius:"50%",background:mc.base+"25",border:`2px solid ${mc.base}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:700,color:mc.base }}>{m.name[0]}</div>;
+            const mc = getMemberColor(m.colorIdx ?? i);
+            const isMe = m.handle === myHandle;
+            return (
+              <div key={m.handle} style={{ position:"relative", display:"flex", flexDirection:"column", alignItems:"center", gap:3 }}>
+                <div onClick={isMe ? () => setShowColorPicker(true) : undefined}
+                  title={isMe ? `${m.name} — ${mc.label} (클릭해서 색 변경)` : `${m.name} — ${mc.label}`}
+                  style={{ position:"relative", width:32, height:32, borderRadius:"50%", background:mc.base+"25", border:`2px solid ${mc.base}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:mc.base, cursor:isMe?"pointer":"default", boxShadow:isMe?`0 0 0 2px ${C.bg}, 0 0 0 3.5px ${mc.base}`:"none" }}>
+                  {m.name[0]}
+                  {isMe && <span style={{ position:"absolute", bottom:-1, right:-1, width:10, height:10, borderRadius:"50%", background:mc.base, border:`1.5px solid ${C.bg}`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:6, color:C.bg, fontWeight:900 }}>✎</span>}
+                </div>
+                <span style={{ fontSize:9, color:isMe?mc.base:C.dim, whiteSpace:"nowrap", maxWidth:38, overflow:"hidden", textOverflow:"ellipsis" }}>{isMe?"나":m.name}</span>
+              </div>
+            );
           })}
         </div>
 
@@ -2140,20 +2603,44 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
                 </div>
                 {todos.length>0&&<span style={{fontSize:10,color:C.dim}}>{catDone}/{todos.length}</span>}
                 <div style={{flex:1}}/>
-                <button onClick={()=>{setAddingTo(cat.id);setNewTodo("");setTimeout(()=>inputRef.current?.focus(),50)}} style={{ width:24,height:24,borderRadius:"50%",background:C.surface,border:`1px solid ${C.border2}`,color:C.muted,cursor:"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1 }}>+</button>
+                <button onClick={()=>{setAddingTo(cat.id);setNewTodo("");setAssignee(null);setTimeout(()=>inputRef.current?.focus(),50)}} style={{ width:24,height:24,borderRadius:"50%",background:C.surface,border:`1px solid ${C.border2}`,color:C.muted,cursor:"pointer",fontSize:15,display:"flex",alignItems:"center",justifyContent:"center",lineHeight:1 }}>+</button>
               </div>
 
               <div style={{ display:"flex",flexDirection:"column",gap:5 }}>
                 {todos.map(todo=>{
-                  const authorIdx=team.members.findIndex(m=>m.handle===todo.author);
-                  const ac=getMemberColor(authorIdx>=0?authorIdx:0);
+                  // assignee 기반으로 색 결정 (없으면 author 기반 fallback)
+                  const ownerHandle = todo.assignee || todo.author;
+                  const ownerMember = team.members.find(m=>m.handle===ownerHandle);
+                  const ownerIdx    = team.members.findIndex(m=>m.handle===ownerHandle);
+                  const ac = getMemberColor(ownerMember?.colorIdx ?? (ownerIdx>=0?ownerIdx:0));
+                  const ownerName = todo.assigneeName || todo.authorName;
                   return (
-                    <div key={todo.id} style={{ display:"flex",alignItems:"center",gap:10,padding:"10px 12px",background:todo.done?"transparent":C.card,borderRadius:radius.md,border:`1px solid ${todo.done?C.border:C.border2}`,opacity:todo.done?0.45:1,transition:"all 0.2s" }}>
+                    <div key={todo.id} style={{
+                      display:"flex", alignItems:"center", gap:10,
+                      padding:"10px 12px",
+                      background: todo.done ? "transparent" : C.card,
+                      borderRadius: radius.md,
+                      // 4번: 담당자 고유색 테두리로 유저 구분
+                      border: todo.done
+                        ? `1px solid ${C.border}`
+                        : `1.5px solid ${ac.base}44`,
+                      borderLeft: todo.done
+                        ? `1px solid ${C.border}`
+                        : `3px solid ${ac.base}`,
+                      opacity: todo.done ? 0.45 : 1,
+                      transition: "all 0.2s"
+                    }}>
                       <div onClick={()=>toggleTodo(cat.id,todo.id)} style={{ width:20,height:20,borderRadius:"50%",flexShrink:0,cursor:"pointer",border:`2px solid ${todo.done?ac.base:C.border2}`,background:todo.done?ac.base:"transparent",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.2s" }}>
                         {todo.done&&<span style={{color:"#080808",fontSize:10,fontWeight:800}}>✓</span>}
                       </div>
                       <span style={{ flex:1,fontSize:13,color:todo.done?C.muted:C.text,textDecoration:todo.done?"line-through":"none" }}>{todo.text}</span>
-                      <div style={{ width:18,height:18,borderRadius:"50%",background:ac.base+"25",border:`1.5px solid ${ac.base}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,color:ac.base,flexShrink:0 }} title={todo.authorName}>{todo.authorName[0]}</div>
+                      {/* 담당자 뱃지 */}
+                      <div style={{ display:"flex",alignItems:"center",gap:4,flexShrink:0 }}>
+                        {todo.author !== (todo.assignee||todo.author) && (
+                          <span style={{ fontSize:9,color:C.dim }}>by {todo.authorName?.split('')[0]}</span>
+                        )}
+                        <div style={{ width:18,height:18,borderRadius:"50%",background:ac.base+"25",border:`1.5px solid ${ac.base}`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,color:ac.base }} title={`담당: ${ownerName}`}>{ownerName?.[0]}</div>
+                      </div>
                       {(todo.author===myHandle||isOwner) && (
                         <button onClick={()=>deleteTodo(cat.id,todo.id)} style={{ background:"none",border:"none",color:C.dim,cursor:"pointer",fontSize:13,padding:0,lineHeight:1,flexShrink:0 }}>✕</button>
                       )}
@@ -2162,12 +2649,46 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
                 })}
               </div>
 
+              {/* 할일 추가 UI — 담당자 지정 뱃지 포함 */}
               {addingTo===cat.id&&(
-                <div style={{ display:"flex",gap:7,marginTop:7 }}>
-                  <input ref={inputRef} value={newTodo} onChange={e=>setNewTodo(e.target.value)}
-                    onKeyDown={e=>{if(e.key==="Enter")addTodo(cat.id);if(e.key==="Escape")setAddingTo(null);}}
-                    placeholder="할 일 입력..." style={{ flex:1,background:C.card,border:`1px solid ${C.border2}`,borderRadius:radius.md,padding:"10px 12px",color:C.text,fontSize:13,outline:"none",fontFamily:"inherit" }}/>
-                  <button onClick={()=>addTodo(cat.id)} style={{ width:40,height:40,background:myColor.base,border:"none",borderRadius:radius.md,cursor:"pointer",fontSize:17,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0 }}>↵</button>
+                <div style={{ marginTop:8, background:C.surface, borderRadius:radius.md, border:`1px solid ${C.border2}`, overflow:"hidden" }}>
+                  {/* 담당자 선택 뱃지 줄 */}
+                  <div style={{ display:"flex", alignItems:"center", gap:6, padding:"8px 12px 0", flexWrap:"wrap" }}>
+                    <span style={{ fontSize:10, color:C.dim, marginRight:2 }}>담당자</span>
+                    {team.members.map((m,i)=>{
+                      const mc  = getMemberColor(m.colorIdx ?? i);
+                      const sel = (assignee||myHandle) === m.handle;
+                      return (
+                        <button key={m.handle} onClick={()=>setAssignee(m.handle)}
+                          style={{ display:"flex",alignItems:"center",gap:4,padding:"3px 9px 3px 6px",borderRadius:radius.full,cursor:"pointer",fontFamily:"inherit",transition:"all 0.15s",
+                            background: sel ? mc.base+"22" : "transparent",
+                            border: `1.5px solid ${sel ? mc.base : C.border}`,
+                            color: sel ? mc.base : C.muted,
+                          }}>
+                          <div style={{ width:12,height:12,borderRadius:"50%",background:mc.base,flexShrink:0 }}/>
+                          <span style={{ fontSize:11,fontWeight:sel?700:400 }}>{m.name}</span>
+                          {m.handle===myHandle && <span style={{ fontSize:9,opacity:0.6 }}> 나</span>}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {/* 입력 줄 */}
+                  <div style={{ display:"flex",gap:0,padding:"6px 8px 8px" }}>
+                    {/* 담당자 색 인디케이터 */}
+                    {(() => {
+                      const tHandle = assignee||myHandle;
+                      const tMember = team.members.find(m=>m.handle===tHandle);
+                      const tIdx    = team.members.findIndex(m=>m.handle===tHandle);
+                      const mc      = getMemberColor(tMember?.colorIdx ?? (tIdx>=0?tIdx:0));
+                      return <div style={{ width:3,borderRadius:"2px 0 0 2px",background:mc.base,flexShrink:0,marginRight:8,borderRadius:2 }}/>;
+                    })()}
+                    <input ref={inputRef} value={newTodo} onChange={e=>setNewTodo(e.target.value)}
+                      onKeyDown={e=>{if(e.key==="Enter")addTodo(cat.id);if(e.key==="Escape"){setAddingTo(null);setAssignee(null);}}}
+                      placeholder="할 일 입력..."
+                      style={{ flex:1,background:"transparent",border:"none",color:C.text,fontSize:13,outline:"none",fontFamily:"inherit",padding:"6px 0" }}/>
+                    <button onClick={()=>addTodo(cat.id)}
+                      style={{ width:34,height:34,background:myColor.base,border:"none",borderRadius:radius.sm,cursor:"pointer",fontSize:16,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0 }}>↵</button>
+                  </div>
                 </div>
               )}
             </div>
@@ -2180,27 +2701,89 @@ function TeamDetail({ team, myHandle, onBack, onUpdate, settings, onLeave, onDel
         )}
       </div>
 
-      {showInvite&&<InviteModal team={team} onClose={()=>setShowInvite(false)} onInvite={inviteMember} friends={friends}/>}
+      {showColorPicker && <ColorPickerModal team={team} myHandle={myHandle} onClose={()=>setShowColorPicker(false)} onSelect={changeMyColor}/>}
+      {showInvite&&<InviteModal team={team} onClose={()=>setShowInvite(false)} onInvite={inviteMember} onCancelInvite={cancelInvite}/>}
     </div>
   );
 }
 
 // 팀 목록 (검색 포함)
-function TeamScreen({ myHandle, myName, settings, friends }) {
-  const [teams, setTeams]         = useState(DEMO_TEAMS(myHandle, myName));
+function TeamScreen({ user, settings }) {
+  const myHandle = user.handle;
+  const myName   = user.name;
+  const [teams, setTeams]         = useState(() => DEMO_TEAMS(user.handle, user.name));
   const [showCreate, setShowCreate] = useState(false);
   const [activeTeam, setActiveTeam] = useState(null);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [teamSelectedDate, setTeamSelectedDate] = useState(getTodayKey);
+  const [joinCode, setJoinCode]     = useState("");
+  const [joinResult, setJoinResult] = useState(null);
+  // TeamDetail 재마운트에도 유지 — 날짜별 BLACK 1회 보장
+  const blackShownDates = useRef(new Set());
+
+  // handle/name 변경 시 모든 팀의 멤버 정보 동기화
+  const prevHandleRef = useRef(user.handle);
+  const prevNameRef   = useRef(user.name);
+  useEffect(() => {
+    const oldHandle = prevHandleRef.current;
+    const oldName   = prevNameRef.current;
+    if (oldHandle === user.handle && oldName === user.name) return;
+    setTeams(ts => ts.map(t => ({
+      ...t,
+      members: t.members.map(m =>
+        m.handle === oldHandle ? { ...m, handle: user.handle, name: user.name } : m
+      ),
+      // todosByDate 내 author handle도 동기화
+      todosByDate: Object.fromEntries(
+        Object.entries(t.todosByDate || {}).map(([dk, bycat]) => [
+          dk,
+          Object.fromEntries(
+            Object.entries(bycat).map(([cid, todos]) => [
+              cid,
+              todos.map(td => ({
+                ...td,
+                author:       td.author === oldHandle ? user.handle : td.author,
+                authorName:   td.author === oldHandle ? user.name   : td.authorName,
+                assignee:     td.assignee === oldHandle ? user.handle : td.assignee,
+                assigneeName: td.assignee === oldHandle ? user.name   : td.assigneeName,
+              }))
+            ])
+          )
+        ])
+      ),
+      // pendingInvites handle 동기화
+      pendingInvites: (t.pendingInvites || []).map(p =>
+        p.handle === oldHandle ? { ...p, handle: user.handle, name: user.name } : p
+      ),
+    })));
+    if (activeTeam) {
+      setActiveTeam(prev => prev ? {
+        ...prev,
+        members: prev.members.map(m =>
+          m.handle === oldHandle ? { ...m, handle: user.handle, name: user.name } : m
+        ),
+      } : prev);
+    }
+    prevHandleRef.current = user.handle;
+    prevNameRef.current   = user.name;
+  }, [user.handle, user.name]);
 
   const updateTeam = (updated) => {
     setTeams(ts => ts.map(t => t.id === updated.id ? updated : t));
     if (activeTeam?.id === updated.id) setActiveTeam(updated);
   };
 
+  // 랜덤 팀 코드 생성 (6자리 영대문자+숫자)
+  const genTeamCode = () => {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    return Array.from({length: 6}, () => chars[Math.floor(Math.random()*chars.length)]).join("");
+  };
+
   const createTeam = ({ name, desc }) => {
     const team = {
       id: uid(), name, desc,
-      members: [{ handle: myHandle, name: myName, avatar: "" }],
+      teamCode: genTeamCode(),
+      members: [{ handle: myHandle, name: myName, avatar: "", colorIdx: 0 }],
+      joinRequests: [],  // [{ handle, name, requestedAt }]
       cats: [], todosByDate: {}, paletteHistory: {}, createdAt: Date.now(),
     };
     setTeams(ts => [team, ...ts]);
@@ -2211,19 +2794,72 @@ function TeamScreen({ myHandle, myName, settings, friends }) {
   const leaveTeam = (teamId, handle) => {
     setTeams(ts => {
       const updated = ts.map(t => t.id===teamId ? {...t, members: t.members.filter(m=>m.handle!==handle)} : t);
-      // 마지막 멤버가 나가면 팀 자동 삭제
       return updated.filter(t => t.members.length > 0);
     });
     setActiveTeam(null);
   };
+
+  // 팀원 추방 (팀장만)
+  const kickMember = (teamId, handle) => {
+    setTeams(ts => ts.map(t => t.id===teamId ? {...t, members: t.members.filter(m=>m.handle!==handle)} : t));
+    if (activeTeam?.id === teamId) {
+      setActiveTeam(prev => prev ? {...prev, members: prev.members.filter(m=>m.handle!==handle)} : prev);
+    }
+  };
+
   const deleteTeam = (teamId) => {
     setTeams(ts => ts.filter(t => t.id !== teamId));
     setActiveTeam(null);
   };
 
-  if (activeTeam) return <TeamDetail team={activeTeam} myHandle={myHandle} onBack={() => setActiveTeam(null)} onUpdate={updateTeam} settings={settings} onLeave={leaveTeam} onDelete={deleteTeam} friends={friends} />;
+  // 참여요청 보내기 (팀 코드 검색 후)
+  const sendJoinRequest = (teamCode) => {
+    const target = teams.find(t => t.teamCode === teamCode.toUpperCase());
+    if (!target) return "notfound";
+    if (target.members.some(m => m.handle === myHandle)) return "already";
+    if ((target.joinRequests||[]).some(r => r.handle === myHandle)) return "pending";
+    const updated = {
+      ...target,
+      joinRequests: [...(target.joinRequests||[]), { handle: myHandle, name: myName, requestedAt: Date.now() }],
+    };
+    updateTeam(updated);
+    return "sent";
+  };
 
-  const filtered = teams.filter(t => t.name.toLowerCase().includes(searchQuery.toLowerCase()));
+  // 참여요청 수락
+  const acceptJoinRequest = (teamId, handle) => {
+    const t = teams.find(x => x.id === teamId);
+    if (!t) return;
+    // 정원 8명 체크
+    if (t.members.length >= 8) return;
+    const req = (t.joinRequests||[]).find(r => r.handle === handle);
+    if (!req) return;
+    const usedIdxs = t.members.map((m,i) => m.colorIdx ?? i);
+    const nextColorIdx = [0,1,2,3,4,5,6,7].find(i => !usedIdxs.includes(i)) ?? t.members.length;
+    const updated = {
+      ...t,
+      members: [...t.members, { handle: req.handle, name: req.name, avatar: "", colorIdx: nextColorIdx }],
+      joinRequests: (t.joinRequests||[]).filter(r => r.handle !== handle),
+    };
+    updateTeam(updated);
+  };
+
+  // 참여요청 거절
+  const rejectJoinRequest = (teamId, handle) => {
+    const t = teams.find(x => x.id === teamId);
+    if (!t) return;
+    updateTeam({ ...t, joinRequests: (t.joinRequests||[]).filter(r => r.handle !== handle) });
+  };
+
+  if (activeTeam) return <TeamDetail team={activeTeam} myHandle={myHandle} onBack={() => setActiveTeam(null)} onUpdate={updateTeam} settings={settings} onLeave={leaveTeam} onDelete={deleteTeam} onKick={kickMember} onAcceptJoin={acceptJoinRequest} onRejectJoin={rejectJoinRequest} selectedDate={teamSelectedDate} setSelectedDate={setTeamSelectedDate} blackShownDates={blackShownDates} />;
+
+  const handleJoin = () => {
+    if (!joinCode.trim()) return;
+    const result = sendJoinRequest(joinCode.trim());
+    setJoinResult(result);
+    if (result === "sent") setJoinCode("");
+    setTimeout(() => setJoinResult(null), 2800);
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "system-ui,sans-serif", paddingBottom: 90 }}>
@@ -2231,60 +2867,84 @@ function TeamScreen({ myHandle, myName, settings, friends }) {
       <div style={{ padding: "24px 18px 0", display: "flex", alignItems: "flex-end", justifyContent: "space-between" }}>
         <div>
           <div style={{ fontSize: 10, color: C.dim, letterSpacing: "0.3em", textTransform: "uppercase", marginBottom: 2 }}>makeblack</div>
-          <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.03em" }}>팀</div>
+          <div style={{ fontSize: 22, fontWeight: 700, letterSpacing: "-0.03em" }}>BLEND</div>
         </div>
         <button onClick={() => setShowCreate(true)} style={{ height: 32, padding: "0 14px", borderRadius: radius.full, background: C.surface, border: `1px solid ${C.border}`, color: C.muted, cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>+ 팀 만들기</button>
       </div>
 
-      {/* 검색 */}
+      {/* 팀 코드로 참여 */}
       <div style={{ padding: "14px 18px 0" }}>
-        <input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="팀 검색..."
-          style={{ width: "100%", boxSizing: "border-box", background: C.surface, border: `1px solid ${C.border}`, borderRadius: radius.md, padding: "10px 14px", color: C.text, fontSize: 13, outline: "none", fontFamily: "inherit" }} />
+        <div style={{ background: C.surface, borderRadius: radius.lg, border: `1px solid ${C.border}`, padding: "14px" }}>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>팀 코드로 참여하기</div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input value={joinCode} onChange={e => setJoinCode(e.target.value.toUpperCase())}
+              onKeyDown={e => e.key === "Enter" && handleJoin()}
+              placeholder="팀 코드 6자리 (예: AB3X7K)"
+              maxLength={6}
+              style={{ flex: 1, background: C.card, border: `1px solid ${C.border2}`, borderRadius: radius.sm, padding: "9px 12px", color: C.text, fontSize: 13, outline: "none", fontFamily: "monospace", letterSpacing: "0.15em", textTransform: "uppercase" }} />
+            <button onClick={handleJoin}
+              style={{ padding: "9px 16px", background: C.text, border: "none", borderRadius: radius.sm, color: C.bg, cursor: "pointer", fontWeight: 700, fontFamily: "inherit", fontSize: 12, flexShrink: 0 }}>참여요청</button>
+          </div>
+          {joinResult && (
+            <div style={{ marginTop: 8, fontSize: 11, color:
+              joinResult === "sent"     ? "#5ce65c" :
+              joinResult === "notfound" ? "#ff6b6b" :
+              joinResult === "already"  ? "#ffd166" : "#6c8fff"
+            }}>
+              { joinResult === "sent"     ? "✓ 참여요청을 보냈어요. 방장이 수락하면 합류돼요." :
+                joinResult === "notfound" ? "✕ 팀 코드를 찾을 수 없어요." :
+                joinResult === "already"  ? "이미 참여 중인 팀이에요." :
+                                            "이미 참여요청을 보낸 팀이에요." }
+            </div>
+          )}
+        </div>
       </div>
 
       {/* 팀 목록 */}
-      <div style={{ padding: "14px 18px 0" }}>
-        {filtered.length === 0 && (
+      <div style={{ padding: "10px 18px 0" }}>
+        {teams.length === 0 && (
           <div style={{ textAlign: "center", padding: "48px 0", color: C.dim }}>
             <div style={{ fontSize: 28, marginBottom: 12 }}>◈</div>
-            <div style={{ fontSize: 13, marginBottom: 6 }}>{searchQuery ? "검색 결과가 없어요" : "아직 팀이 없어요"}</div>
-            {!searchQuery && <div style={{ fontSize: 11, color: C.dim }}>+ 팀 만들기로 시작해보세요</div>}
+            <div style={{ fontSize: 13, marginBottom: 6 }}>아직 팀이 없어요</div>
+            <div style={{ fontSize: 11, color: C.dim }}>+ 팀 만들기로 시작해보세요</div>
           </div>
         )}
-        {filtered.map(team => {
-          // todosByDate 전체 집계
+        {teams.map(team => {
           const allTeamTodos = Object.values(team.todosByDate || {}).flatMap(byDate => Object.values(byDate).flat());
           const done  = allTeamTodos.filter(t => t.done).length;
           const total = allTeamTodos.length;
           const prog  = total > 0 ? done / total : 0;
-          // 팔레트: 가장 최근 날짜의 drops 사용
           const latestDate = Object.keys(team.paletteHistory || {}).sort().pop();
           const latestDrops = latestDate ? (team.paletteHistory[latestDate]?.drops || []) : [];
+          const pendingCount = (team.joinRequests||[]).length;
+          const isOwner = team.members[0]?.handle === myHandle;
           return (
-            <div key={team.id} onClick={() => setActiveTeam(team)} style={{ padding: "14px", marginBottom: 10, background: C.surface, borderRadius: radius.lg, border: `1px solid ${C.border}`, cursor: "pointer", transition: "border-color 0.15s" }}>
+            <div key={team.id} onClick={() => setActiveTeam(team)} style={{ padding: "14px", marginBottom: 10, background: C.surface, borderRadius: radius.lg, border: `1px solid ${C.border}`, cursor: "pointer", transition: "border-color 0.15s", position: "relative" }}>
+              {/* 참여요청 뱃지 (방장만) */}
+              {isOwner && pendingCount > 0 && (
+                <div style={{ position: "absolute", top: 10, right: 10, width: 18, height: 18, borderRadius: "50%", background: "#ff6b6b", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: "#fff" }}>{pendingCount}</div>
+              )}
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                {/* 팀 팔레트 미니 */}
                 <div style={{ width: 44, height: 44, borderRadius: radius.sm, overflow: "hidden", flexShrink: 0, border: `1px solid ${C.border}` }}>
                   <TeamPaletteCanvas drops={latestDrops} totalCount={total} size={44} />
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{team.name}</div>
+                  <div style={{ fontSize: 10, color: C.dim, marginTop: 1, fontFamily: "monospace", letterSpacing: "0.08em" }}>#{team.teamCode||"------"}</div>
                   {team.desc && <div style={{ fontSize: 11, color: C.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{team.desc}</div>}
                 </div>
                 <span style={{ fontSize: 11, color: C.dim, flexShrink: 0 }}>{team.members.length}명</span>
               </div>
-              {/* 멤버 색 도트 */}
               <div style={{ display: "flex", gap: 5, marginBottom: 8 }}>
                 {team.members.map((m, i) => {
-                  const mc = getMemberColor(i);
+                  const mc = getMemberColor(m.colorIdx ?? i);
                   return <div key={m.handle} title={m.name} style={{ width: 8, height: 8, borderRadius: "50%", background: mc.base, boxShadow: `0 0 4px ${mc.base}88` }} />;
                 })}
               </div>
-              {/* 진행률 */}
               {total > 0 && (
                 <div>
                   <div style={{ height: 3, background: C.card, borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
-                    <div style={{ height: "100%", width: `${prog * 100}%`, borderRadius: 3, background: `linear-gradient(90deg, ${getMemberColor(0).base}, ${getMemberColor(team.members.length-1).base})`, transition: "width 0.8s ease" }} />
+                    <div style={{ height: "100%", width: `${prog * 100}%`, borderRadius: 3, background: `linear-gradient(90deg, ${getMemberColor(team.members[0]?.colorIdx ?? 0).base}, ${getMemberColor(team.members[team.members.length-1]?.colorIdx ?? team.members.length-1).base})`, transition: "width 0.8s ease" }} />
                   </div>
                   <div style={{ fontSize: 10, color: C.dim }}>{done}/{total} 완료</div>
                 </div>
@@ -2301,21 +2961,24 @@ function TeamScreen({ myHandle, myName, settings, friends }) {
 
 // 팀 데이터 구조: { id, name, desc, members, cats, todosByDate, paletteHistory, createdAt }
 function DEMO_TEAMS(myHandle, myName) {
-  const me = { handle: myHandle, name: myName, avatar: "" };
-  const b  = { handle: "@bora", name: "보라", avatar: "" };
-  const ch = { handle: "@chan", name: "찬", avatar: "" };
+  const me = { handle: myHandle, name: myName, avatar: "", colorIdx: 0 };
+  const b  = { handle: "@bora",  name: "보라",  avatar: "", colorIdx: 1 };
+  const ch = { handle: "@chan",  name: "찬",    avatar: "", colorIdx: 2 };
   const today = getTodayKey();
-  const cat1 = { id: 801, name: "기획", color: getMemberColor(0).base };
-  const cat2 = { id: 802, name: "개발", color: getMemberColor(1).base };
-  const t1 = { id: 101, text: "기획서 초안 작성",  done: true,  author: myHandle,  authorName: myName, color: getMemberColor(0).color, rgb: getMemberColor(0).rgb, hue: getMemberColor(0).hue, px: 0.3,  py: 0.4,  seed: 9901 };
-  const t2 = { id: 102, text: "와이어프레임 제작", done: true,  author: "@bora",   authorName: "보라", color: getMemberColor(1).color, rgb: getMemberColor(1).rgb, hue: getMemberColor(1).hue, px: 0.65, py: 0.55, seed: 9902 };
-  const t3 = { id: 103, text: "프로토타입 구현",   done: false, author: "@chan",    authorName: "찬",   color: getMemberColor(2).color, rgb: getMemberColor(2).rgb, hue: getMemberColor(2).hue, px: 0.5,  py: 0.3,  seed: 9903 };
-  const t4 = { id: 104, text: "발표 자료 준비",    done: false, author: myHandle,  authorName: myName, color: getMemberColor(0).color, rgb: getMemberColor(0).rgb, hue: getMemberColor(0).hue, px: 0.4,  py: 0.7,  seed: 9904 };
-  const drop1 = { id: 101, rgb: getMemberColor(0).rgb, hue: getMemberColor(0).hue, color: getMemberColor(0).color, px: 0.3,  py: 0.4,  seed: 9901 };
-  const drop2 = { id: 102, rgb: getMemberColor(1).rgb, hue: getMemberColor(1).hue, color: getMemberColor(1).color, px: 0.65, py: 0.55, seed: 9902 };
+  const c0 = getMemberColor(0), c1 = getMemberColor(1), c2 = getMemberColor(2);
+  const cat1 = { id: 801, name: "기획", color: c0.base };
+  const cat2 = { id: 802, name: "개발", color: c1.base };
+  const t1 = { id: 101, text: "기획서 초안 작성",  done: true,  author: myHandle, authorName: myName, color: c0.color, rgb: c0.rgb, hue: c0.hue, px: 0.3,  py: 0.4,  seed: 9901 };
+  const t2 = { id: 102, text: "와이어프레임 제작", done: true,  author: "@bora",  authorName: "보라", color: c1.color, rgb: c1.rgb, hue: c1.hue, px: 0.65, py: 0.55, seed: 9902 };
+  const t3 = { id: 103, text: "프로토타입 구현",   done: false, author: "@chan",  authorName: "찬",   color: c2.color, rgb: c2.rgb, hue: c2.hue, px: 0.5,  py: 0.3,  seed: 9903 };
+  const t4 = { id: 104, text: "발표 자료 준비",    done: false, author: myHandle, authorName: myName, color: c0.color, rgb: c0.rgb, hue: c0.hue, px: 0.4,  py: 0.7,  seed: 9904 };
+  const drop1 = { id: 101, rgb: c0.rgb, hue: c0.hue, color: c0.color, px: 0.3,  py: 0.4,  seed: 9901 };
+  const drop2 = { id: 102, rgb: c1.rgb, hue: c1.hue, color: c1.color, px: 0.65, py: 0.55, seed: 9902 };
   return [{
     id: 1, name: "졸업 프로젝트 A팀", desc: "UI/UX 디자인 프로젝트",
+    teamCode: "DEMO01",
     members: [me, b, ch],
+    joinRequests: [],
     cats: [cat1, cat2],
     todosByDate: { [today]: { [cat1.id]: [t1, t2], [cat2.id]: [t3, t4] } },
     paletteHistory: { [today]: { drops: [drop1, drop2], total: 4 } },
@@ -2325,182 +2988,11 @@ function DEMO_TEAMS(myHandle, myName) {
 
 
 // ─────────────────────────────────────────────
-// Search / Friend
-// ─────────────────────────────────────────────
-const DEMO_USERS = [
-  { handle: "@bora",   name: "보라",   bio: "디자이너 🎨",          blackCount: 14, followers: 23 },
-  { handle: "@chan",   name: "찬",     bio: "개발자 💻",             blackCount: 8,  followers: 11 },
-  { handle: "@minjun", name: "민준",   bio: "운동 매일 하는 사람 💪", blackCount: 22, followers: 47 },
-  { handle: "@sora",  name: "소라",   bio: "매일 공부 중 📚",        blackCount: 5,  followers: 9  },
-  { handle: "@yuna",  name: "유나",   bio: "할 일 덕후 ✦",           blackCount: 31, followers: 88 },
-  { handle: "@jinho", name: "진호",   bio: "독서 + 글쓰기",          blackCount: 17, followers: 34 },
-  { handle: "@heera", name: "희라",   bio: "새벽 루틴 중",           blackCount: 9,  followers: 15 },
-];
-
-const DEMO_FRIENDS = [
-  { ...DEMO_USERS[0], status: "following" },
-  { ...DEMO_USERS[1], status: "following" },
-];
-
-function UserCard({ u, isSelf, isFollowing, onFollow, onUnfollow }) {
-  const [confirm, setConfirm] = useState(false);
-  return (
-    <div style={{ padding:"14px", background:C.surface, borderRadius:radius.lg, border:`1px solid ${C.border}`, marginBottom:10 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-        {/* 아바타 */}
-        <div style={{ width:44, height:44, borderRadius:"50%", background:`linear-gradient(135deg, hsl(${(u.handle.length*37)%360},60%,55%), hsl(${(u.handle.length*67)%360},60%,45%))`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, fontWeight:700, color:"#fff", flexShrink:0 }}>
-          {u.name[0]}
-        </div>
-        <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:C.text }}>{u.name}</div>
-          <div style={{ fontSize:11, color:C.muted }}>{u.handle}</div>
-          {u.bio && <div style={{ fontSize:11, color:C.dim, marginTop:2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{u.bio}</div>}
-        </div>
-        {/* 팔로우 버튼 */}
-        {!isSelf && (
-          confirm
-            ? <div style={{ display:"flex", gap:6 }}>
-                <button onClick={()=>setConfirm(false)} style={{ padding:"6px 10px", background:"transparent", border:`1px solid ${C.border2}`, borderRadius:radius.full, color:C.muted, cursor:"pointer", fontSize:11, fontFamily:"inherit" }}>취소</button>
-                <button onClick={()=>{onUnfollow(u.handle);setConfirm(false);}} style={{ padding:"6px 10px", background:"transparent", border:`1px solid #ff6b6b`, borderRadius:radius.full, color:"#ff6b6b", cursor:"pointer", fontSize:11, fontFamily:"inherit" }}>언팔로우</button>
-              </div>
-            : <button onClick={()=>isFollowing?setConfirm(true):onFollow(u)} style={{
-                padding:"6px 14px", borderRadius:radius.full, cursor:"pointer", fontSize:11, fontFamily:"inherit",
-                background: isFollowing ? "transparent" : C.text,
-                color:      isFollowing ? C.muted        : C.bg,
-                border:    `1px solid ${isFollowing ? C.border2 : C.text}`,
-              }}>{isFollowing ? "팔로잉" : "팔로우"}</button>
-        )}
-        {isSelf && <span style={{ fontSize:11, color:C.dim, padding:"6px 10px" }}>나</span>}
-      </div>
-      {/* 통계 */}
-      <div style={{ display:"flex", gap:16, marginTop:10, paddingLeft:56 }}>
-        <div style={{ textAlign:"center" }}>
-          <div style={{ fontSize:13, fontWeight:700, color:C.text }}>{u.blackCount}</div>
-          <div style={{ fontSize:9, color:C.muted, marginTop:1, letterSpacing:"0.05em" }}>BLACK</div>
-        </div>
-        <div style={{ textAlign:"center" }}>
-          <div style={{ fontSize:13, fontWeight:700, color:C.text }}>{u.followers}</div>
-          <div style={{ fontSize:9, color:C.muted, marginTop:1, letterSpacing:"0.05em" }}>팔로워</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SearchScreen({ myHandle, friends, onAddFriend, onRemoveFriend }) {
-  const [query, setQuery]   = useState("");
-  const [activeTab, setActiveTab] = useState("search"); // "search" | "friends"
-  const inputRef = useRef(null);
-
-  const isFollowing = (handle) => friends.some(f => f.handle === handle);
-
-  // 검색 결과 — 자신 제외, 쿼리 필터
-  const results = query.trim().length > 0
-    ? DEMO_USERS.filter(u =>
-        u.handle !== myHandle &&
-        (u.handle.toLowerCase().includes(query.toLowerCase()) ||
-         u.name.includes(query))
-      )
-    : [];
-
-  return (
-    <div style={{ minHeight:"100vh", background:C.bg, color:C.text, fontFamily:"system-ui,sans-serif", paddingBottom:90 }}>
-      {/* 헤더 */}
-      <div style={{ padding:"24px 18px 0" }}>
-        <div style={{ fontSize:10, color:C.dim, letterSpacing:"0.3em", textTransform:"uppercase", marginBottom:4 }}>makeblack</div>
-        <div style={{ fontSize:22, fontWeight:700, letterSpacing:"-0.03em", marginBottom:14 }}>검색</div>
-
-        {/* 검색 인풋 */}
-        <div style={{ position:"relative", marginBottom:16 }}>
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={e=>setQuery(e.target.value)}
-            placeholder="이름 또는 @아이디 검색"
-            style={{ width:"100%", boxSizing:"border-box", background:C.surface, border:`1px solid ${query?C.border2:C.border}`, borderRadius:radius.md, padding:"11px 36px 11px 14px", color:C.text, fontSize:13, outline:"none", fontFamily:"inherit", transition:"border-color 0.15s" }}
-          />
-          {query && (
-            <button onClick={()=>setQuery("")} style={{ position:"absolute", right:10, top:"50%", transform:"translateY(-50%)", background:"none", border:"none", color:C.dim, cursor:"pointer", fontSize:16, lineHeight:1, padding:2 }}>✕</button>
-          )}
-        </div>
-
-        {/* 탭 */}
-        <div style={{ display:"flex", gap:6, marginBottom:16 }}>
-          {[["search","검색"],["friends","친구 목록"]].map(([k,l])=>(
-            <button key={k} onClick={()=>setActiveTab(k)} style={{ padding:"6px 14px", borderRadius:radius.full, cursor:"pointer", fontSize:12, fontFamily:"inherit", background:activeTab===k?C.text:"transparent", color:activeTab===k?C.bg:C.muted, border:`1px solid ${activeTab===k?C.text:C.border2}`, transition:"all 0.15s" }}>
-              {l}{k==="friends"&&friends.length>0&&<span style={{ marginLeft:5, fontSize:10, opacity:0.7 }}>{friends.length}</span>}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <div style={{ padding:"0 18px" }}>
-        {/* 검색 탭 */}
-        {activeTab==="search" && (<>
-          {query.trim()==='' && (
-            <div style={{ textAlign:"center", padding:"40px 0", color:C.dim }}>
-              <div style={{ fontSize:28, marginBottom:12 }}>◎</div>
-              <div style={{ fontSize:13 }}>아이디나 이름으로 친구를 찾아보세요</div>
-            </div>
-          )}
-          {query.trim()!=='' && results.length===0 && (
-            <div style={{ textAlign:"center", padding:"40px 0", color:C.dim }}>
-              <div style={{ fontSize:13 }}>검색 결과가 없어요</div>
-              <div style={{ fontSize:11, marginTop:6 }}>정확한 아이디를 입력해보세요</div>
-            </div>
-          )}
-          {results.map(u=>(
-            <UserCard key={u.handle} u={u}
-              isSelf={u.handle===myHandle}
-              isFollowing={isFollowing(u.handle)}
-              onFollow={onAddFriend}
-              onUnfollow={onRemoveFriend}
-            />
-          ))}
-        </>)}
-
-        {/* 친구 목록 탭 */}
-        {activeTab==="friends" && (<>
-          {friends.length===0 && (
-            <div style={{ textAlign:"center", padding:"40px 0", color:C.dim }}>
-              <div style={{ fontSize:28, marginBottom:12 }}>◈</div>
-              <div style={{ fontSize:13, marginBottom:6 }}>아직 팔로우한 친구가 없어요</div>
-              <div style={{ fontSize:11 }}>검색으로 친구를 찾아 팔로우해보세요</div>
-            </div>
-          )}
-          {friends.map(u=>(
-            <UserCard key={u.handle} u={u}
-              isSelf={u.handle===myHandle}
-              isFollowing={true}
-              onFollow={onAddFriend}
-              onUnfollow={onRemoveFriend}
-            />
-          ))}
-        </>)}
-      </div>
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────
-// Placeholder screens
-// ─────────────────────────────────────────────
-function PlaceholderScreen({ label, icon }) {
-  return (
-    <div style={{ minHeight: "100vh", background: C.bg, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14, paddingBottom: 80 }}>
-      <div style={{ width: 56, height: 56, borderRadius: radius.lg, background: C.surface, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22, color: C.dim }}>{icon}</div>
-      <div style={{ fontSize: 14, color: C.dim, letterSpacing: "0.1em" }}>{label}</div>
-      <div style={{ fontSize: 11, color: C.border2 }}>coming soon</div>
-    </div>
-  );
-}
-// ─────────────────────────────────────────────
 // Bottom Nav
 // ─────────────────────────────────────────────
 function BottomNav({ tab, setTab }) {
   const items = [
     { key: "home",    icon: "⌂",  label: "홈"        },
-    { key: "search",  icon: "◎",  label: "검색"      },
     { key: "team",    icon: "◈",  label: "팀"        },
     { key: "mypage",  icon: "◉",  label: "마이페이지" },
   ];
@@ -2534,7 +3026,15 @@ function BottomNav({ tab, setTab }) {
 // ─────────────────────────────────────────────
 export default function MakeBlack() {
   const [tab, setTab]                       = useState("home");
-  const [showOnboarding, setShowOnboarding] = useState(true);
+  // 최초 1회만 온보딩 표시 — localStorage로 영속화
+  const [showOnboarding, setShowOnboarding] = useState(() => {
+    try { return !localStorage.getItem("mb_onboarded"); }
+    catch { return true; }
+  });
+  const doneOnboarding = () => {
+    try { localStorage.setItem("mb_onboarded", "1"); } catch {}
+    setShowOnboarding(false);
+  };
   // ── 전역 상태 (탭 전환해도 유지) ──
   const [cats, setCats]                     = useState(DEFAULT_CATEGORIES);
   const [ruts, setRuts]                     = useState(DEFAULT_ROUTINES);
@@ -2544,7 +3044,6 @@ export default function MakeBlack() {
   // 전역 설정
   const [settings, setSettings] = useState({
     calStartSunday: true,
-    use24h: false,
     language: "ko",
     reminderTime: "09:00",
     reminderOn: false,
@@ -2553,18 +3052,22 @@ export default function MakeBlack() {
     paletteSize: "medium",
     pinLock: false,
     pin: "",
-    privacy: "public", // public | followers | private
-    theme: "dark", // dark | light
+    theme: "dark",
   });
   // 유저 프로필 (실제 서비스시 서버에서)
   const [user, setUser] = useState({
-    name: "사용자", handle: "@user", bio: "매일 조금씩, 검정을 향해 ✦",
-    avatar: "", followers: 12, following: 8,
-    email: "user@makeblack.app",
+    name: "사용자", handle: "@user",
+    avatar: "", email: "user@makeblack.app",
   });
-  const [friends, setFriends] = useState(DEMO_FRIENDS);
-  const addFriend    = (u) => setFriends(fs => fs.some(f=>f.handle===u.handle) ? fs : [...fs, {...u, status:"following"}]);
-  const removeFriend = (handle) => setFriends(fs => fs.filter(f=>f.handle!==handle));
+  // handle/name 변경 시 팀 내 멤버 정보도 동기화
+  const setUserAndSync = (updater) => {
+    setUser(prev => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      // handle이나 name이 바뀌었을 때 → TeamScreen이 re-render 시 user prop으로 자동 반영
+      // (TeamScreen 내 teams state는 myHandle을 user.handle로 참조하므로 prop만 최신으로 유지)
+      return next;
+    });
+  };
   const updSetting = (key, val) => setSettings(s => ({ ...s, [key]: val }));
 
   // 테마 적용 — 렌더마다 C를 현재 테마로 갱신
@@ -2606,15 +3109,14 @@ export default function MakeBlack() {
 
   return (
     <div style={{ maxWidth: 480, margin: "0 auto", position: "relative", minHeight: "100vh", background: C.bg }}>
-      {showOnboarding && <OnboardingOverlay onDone={() => { setShowOnboarding(false); }} />}
+      {showOnboarding && <OnboardingOverlay onDone={doneOnboarding} />}
       {!showOnboarding && (
         <div style={{ display: tab === "home" ? "block" : "none" }}>
           <HomeScreen cats={cats} setCats={setCats} ruts={ruts} setRuts={setRuts} paletteHistory={paletteHistory} setPaletteHistory={setPaletteHistory} todosByDate={todosByDate} setTodosByDate={setTodosByDate} selectedDate={selectedDate} setSelectedDate={setSelectedDate} settings={settings} />
         </div>
       )}
-      {!showOnboarding && <div style={{ display: tab === "search" ? "block" : "none" }}><SearchScreen myHandle={user.handle} friends={friends} onAddFriend={addFriend} onRemoveFriend={removeFriend} /></div>}
-      {!showOnboarding && <div style={{ display: tab === "team" ? "block" : "none" }}><TeamScreen myHandle={user.handle} myName={user.name} settings={settings} friends={friends} /></div>}
-      {tab === "mypage"  && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} cats={cats} ruts={ruts} user={user} setUser={setUser} settings={settings} updSetting={updSetting} friends={friends} onTabChange={setTab} />}
+      {!showOnboarding && <div style={{ display: tab === "team" ? "block" : "none" }}><TeamScreen user={user} settings={settings} /></div>}
+      {tab === "mypage" && <MyPageScreen paletteHistory={paletteHistory} todosByDate={todosByDate} cats={cats} ruts={ruts} user={user} setUser={setUserAndSync} settings={settings} updSetting={updSetting} onTabChange={setTab} />}
       <BottomNav tab={tab} setTab={setTab} />
       <style>{`:root { --bg: ${C.bg}; --surface: ${C.surface}; --text: ${C.text}; --muted: ${C.muted}; --dim: ${C.dim}; --border: ${C.border}; }`}</style>
       <style>{`
@@ -2634,6 +3136,10 @@ export default function MakeBlack() {
         @keyframes slideDown { from { transform: translateX(-50%) translateY(-100%) } to { transform: translateX(-50%) translateY(0) } }
         @keyframes slideUp { from { transform: translateX(-50%) translateY(0) } to { transform: translateX(-50%) translateY(-108%) } }
         @keyframes pulse  { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:0.4;transform:scale(1.08)} }
+        @keyframes lastGlow {
+          0%,100% { box-shadow: 0 0 8px 1px var(--text), 0 0 0 1px var(--text); opacity: 0.7; }
+          50%     { box-shadow: 0 0 18px 4px var(--text), 0 0 0 2px var(--text); opacity: 1; }
+        }
         input::placeholder { color: var(--dim); }
         select option { background: var(--bg); color: var(--text); }
         * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
