@@ -1,7 +1,6 @@
 import { useEffect, useRef } from 'react';
-import { Animated, StyleSheet } from 'react-native';
+import { Animated, View, StyleSheet } from 'react-native';
 
-// 30-step pre-calculated bezier keyframes for native driver compatibility
 function calcBezierKeyframes(sx, sy, tx, ty, steps) {
   const cx1 = sx + (tx - sx) * 0.3;
   const cy1 = Math.min(sy, ty) - Math.abs(tx - sx) * 0.25;
@@ -26,69 +25,66 @@ function calcBezierKeyframes(sx, sy, tx, ty, steps) {
   return pts;
 }
 
-// Animate through pre-calculated bezier keyframes using native driver
-// by driving a single 0→1 Animated.Value and using interpolate with many keyframes
 export default function FlyingOrb({ sx, sy, tx, ty, onDone }) {
   const STEPS = 30;
   const progress = useRef(new Animated.Value(0)).current;
 
   const keyframes = calcBezierKeyframes(sx, sy, tx, ty, STEPS);
   const inputRange = keyframes.map((_, i) => i / STEPS);
-  const xRange = keyframes.map(p => p.x - 20); // center the 40px orb
+  const xRange = keyframes.map(p => p.x - 20); // -20: 40px orb 중심 보정
   const yRange = keyframes.map(p => p.y - 20);
 
   const animX = progress.interpolate({ inputRange, outputRange: xRange });
   const animY = progress.interpolate({ inputRange, outputRange: yRange });
   const animOpacity = progress.interpolate({
-    inputRange: [0, 0.75, 1],
-    outputRange: [1, 1, 0],
-  });
-  const animSize = progress.interpolate({
-    inputRange: [0, 1],
-    outputRange: [40, 16],
+    inputRange: [0, 0.05, 0.75, 1],
+    outputRange: [0, 1, 1, 0],
   });
 
   useEffect(() => {
     progress.setValue(0);
-    Animated.timing(progress, {
-      toValue: 1,
-      duration: 500,
-      useNativeDriver: false, // size interpolation requires false; position works fine
-    }).start(({ finished }) => {
-      if (finished && onDone) onDone();
-    });
+    setTimeout(() => {
+      Animated.timing(progress, {
+        toValue: 1,
+        duration: 500,
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (finished && onDone) onDone();
+      });
+    }, 10);
   }, []);
 
   return (
+    // 외부 Animated.View: position + opacity (native driver)
     <Animated.View
       style={[
-        styles.orb,
+        styles.container,
         {
           opacity: animOpacity,
-          width: animSize,
-          height: animSize,
-          borderRadius: Animated.divide(animSize, new Animated.Value(2)),
-          transform: [
-            { translateX: animX },
-            { translateY: animY },
-          ],
+          transform: [{ translateX: animX }, { translateY: animY }],
         },
       ]}
-    />
+    >
+      {/* 내부 plain View: borderRadius + overflow: 'hidden' — Android clip 보장 */}
+      <View style={styles.clip} />
+    </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
-  orb: {
+  container: {
     position: 'absolute',
     top: 0,
     left: 0,
-    backgroundColor: '#ffffff',
-    shadowColor: '#ffffff',
-    shadowOpacity: 0.7,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 0 },
-    elevation: 12,
+    width: 40,
+    height: 40,
     zIndex: 350,
+  },
+  clip: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    overflow: 'hidden',
+    backgroundColor: '#ffffff',
   },
 });
