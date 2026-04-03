@@ -1,49 +1,90 @@
-import { useState, useEffect, useRef } from 'react';
-import PaletteCanvas from '../../components/PaletteCanvas';
-import FlyingOrb from '../../components/FlyingOrb';
+// ══════════════════════════════════════════════════════
+// team.js — 팀 화면
+// 1단계: imports + 상수
+// 2단계: TeamScreen (팀 목록)
+// 3단계: TeamDetailScreen (팀 상세 — state/로딩/Realtime)
+// 4단계: TeamDetailScreen (액션 — 할일 CRUD, 팔레트, BLACK)
+// 5단계: TeamDetailScreen (렌더 — JSX)
+// 6단계: 모달 컴포넌트들 + StyleSheet
+// ══════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────
+// 1단계 ▼ imports + 상수
+// ─────────────────────────────────────────────────────
+
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity,
-  TextInput, StyleSheet, ActivityIndicator,
-  Alert, Modal, FlatList, Animated, Dimensions,
+  View, Text, ScrollView, TouchableOpacity, TextInput,
+  StyleSheet, ActivityIndicator, Alert, Modal, Animated,
+  Dimensions, KeyboardAvoidingView, Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../lib/supabase';
-import { generateTodoColor, dateKey, addDays, formatDateLabel } from '../../lib/colorMath';
+import { dateKey, addDays, generateTodoColor, hslToRgb } from '../../lib/colorMath';
 import {
   fetchMyTeams, createTeam, fetchTeamDetail,
   updateTeam, deleteTeam, leaveTeam,
-  fetchTeamCategories, createTeamCategory,
+  fetchTeamCategories, createTeamCategory, deleteTeamCategory,
   fetchTeamTodos, createTeamTodo, toggleTeamTodo, deleteTeamTodo,
   fetchTeamPaletteHistory, upsertTeamPaletteHistory,
-  getMemberColor, searchUsers,
+  getMemberColor, searchUsers, inviteMember,
+  createJoinRequest, fetchPendingRequests, acceptJoinRequest, rejectJoinRequest,
+  findTeamByCode,
 } from '../../lib/teamService';
+import PaletteCanvas from '../../components/PaletteCanvas';
+import FlyingOrb from '../../components/FlyingOrb';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 
 const C = {
-  bg: '#0a0a0a', surface: '#141414', card: '#181818',
-  border: '#242424', border2: '#2e2e2e',
-  text: '#f0ece6', muted: '#888888', dim: '#555555',
+  bg:          '#0a0a0a',
+  surface:     '#141414',
+  card:        '#181818',
+  border:      '#242424',
+  border2:     '#2e2e2e',
+  text:        '#f0ece6',
+  muted:       '#888888',
+  dim:         '#555555',
+  paletteBase: '#0d0c0b',
 };
 
+const R = { sm: 10, md: 16, lg: 22, full: 999 };
+
 const CAT_COLORS = [
-  '#ff6b6b','#ffd166','#06d6a0','#4ecdc4',
-  '#6c8fff','#c77dff','#f77f00','#4cc9f0',
+  '#ff6b6b', '#ffd166', '#06d6a0', '#4ecdc4',
+  '#6c8fff', '#c77dff', '#f77f00', '#4cc9f0',
 ];
 
-// ══════════════════════════════════════════════════════
-// 팀 목록 화면
-// ══════════════════════════════════════════════════════
-export default function TeamScreen() {
-  const [userId, setUserId] = useState(null);
-  const [teams, setTeams] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedTeam, setSelectedTeam] = useState(null);
-  const [createModalVisible, setCreateModalVisible] = useState(false);
-  const [newTeamName, setNewTeamName] = useState('');
-  const [newTeamDesc, setNewTeamDesc] = useState('');
-  const [creating, setCreating] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
+// 멤버 colorIndex → 팔레트 drop 데이터 생성
+// getMemberColor(idx) = { hue, color(hex) } → drop { hue, rgb, color }
+function memberColorToDrop(colorIndex) {
+  const { hue, color } = getMemberColor(colorIndex);
+  const rgb = hslToRgb(hue, 82, 54);
+  return { hue, rgb, color };
+}
 
+// ══════════════════════════════════════════════════════
+// 2단계 ▼ TeamScreen — 팀 목록
+// ══════════════════════════════════════════════════════
+
+export default function TeamScreen() {
+  // ── state ────────────────────────────────────────────
+  const [userId, setUserId]             = useState(null);
+  const [teams, setTeams]               = useState([]);
+  const [loading, setLoading]           = useState(true);
+  const [selectedTeam, setSelectedTeam] = useState(null);
+  const [showCreate, setShowCreate]     = useState(false);
+  const [searchQuery, setSearchQuery]   = useState('');
+
+  // ── 코드로 팀 참여 ────────────────────────────────────
+  const [showJoin, setShowJoin]           = useState(false);
+  const [joinStep, setJoinStep]           = useState('input'); // 'input' | 'preview'
+  const [joinCode, setJoinCode]           = useState('');
+  const [joinPreview, setJoinPreview]     = useState(null);   // { id, name, description }
+  const [joinSearching, setJoinSearching] = useState(false);
+  const [joinSending, setJoinSending]     = useState(false);
+
+  // ── 세션 로드 ─────────────────────────────────────────
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session) setUserId(session.user.id);
@@ -55,11 +96,27 @@ export default function TeamScreen() {
     loadTeams();
   }, [userId]);
 
+  // ── Realtime: team_join_requests 변경 시 자동 새로고침 ──
+  useEffect(() => {
+    if (!userId) return;
+    const sub = supabase
+      .channel('join-requests')
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'team_join_requests',
+      }, () => {
+        loadTeams();
+      })
+      .subscribe();
+    return () => supabase.removeChannel(sub);
+  }, [userId]);
+
+  // ── 팀 목록 로드 ──────────────────────────────────────
   const loadTeams = async () => {
     setLoading(true);
     try {
       const data = await fetchMyTeams(userId);
-      // 각 팀의 멤버 수와 오늘 팔레트 정보를 함께 불러오기
       const enriched = await Promise.all(data.map(async (team) => {
         try {
           const [detail, palette] = await Promise.all([
@@ -77,64 +134,119 @@ export default function TeamScreen() {
         }
       }));
       setTeams(enriched);
-    } catch (e) {
+    } catch {
       Alert.alert('오류', '팀 목록을 불러오지 못했어요');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleCreateTeam = async () => {
-    if (!newTeamName.trim()) return;
-    setCreating(true);
+  // ── 팀 생성 ──────────────────────────────────────────
+  const handleCreateTeam = async ({ name, desc }) => {
     try {
-      const team = await createTeam(userId, newTeamName.trim(), newTeamDesc.trim());
-      setCreateModalVisible(false);
-      setNewTeamName('');
-      setNewTeamDesc('');
+      const team = await createTeam(userId, name, desc);
+      setShowCreate(false);
       await loadTeams();
-      setSelectedTeam(team);
-    } catch (e) {
+      const code = team.id.slice(0, 8).toUpperCase();
+      Alert.alert('팀 생성 완료 🎉', `팀 코드: ${code}\n멤버들에게 공유하세요.`);
+      setSelectedTeam({ ...team, members: [], todayDrops: [], todayTotal: 0 });
+    } catch {
       Alert.alert('오류', '팀 생성에 실패했어요');
-    } finally {
-      setCreating(false);
     }
   };
 
+  // ── 코드로 팀 찾기 ───────────────────────────────────
+  const handleFindTeam = async () => {
+    const trimmed = joinCode.trim().toUpperCase();
+    if (trimmed.length < 6) {
+      Alert.alert('', '팀 코드는 6자리 이상이에요');
+      return;
+    }
+    setJoinSearching(true);
+    try {
+      const found = await findTeamByCode(trimmed);
+      setJoinPreview(found);
+      setJoinStep('preview');
+    } catch (e) {
+      Alert.alert('', e.message);
+    } finally {
+      setJoinSearching(false);
+    }
+  };
+
+  // ── 참여 요청 전송 ────────────────────────────────────
+  const handleSendJoinRequest = async () => {
+    if (!joinPreview || !userId) return;
+    const alreadyMember = teams.some(t => t.id === joinPreview.id);
+    if (alreadyMember) {
+      Alert.alert('', '이미 참여 중인 팀이에요');
+      return;
+    }
+    setJoinSending(true);
+    try {
+      await createJoinRequest(joinPreview.id, userId);
+      setShowJoin(false);
+      setJoinCode('');
+      setJoinStep('input');
+      setJoinPreview(null);
+      Alert.alert('요청 전송 완료', '방장이 수락하면 팀에 입장됩니다.');
+    } catch (e) {
+      Alert.alert('오류', e.message ?? '요청 전송에 실패했어요');
+    } finally {
+      setJoinSending(false);
+    }
+  };
+
+  const closeJoinModal = () => {
+    setShowJoin(false);
+    setJoinCode('');
+    setJoinStep('input');
+    setJoinPreview(null);
+  };
+
+  // ── 팀 상세로 이동 ────────────────────────────────────
   if (selectedTeam) {
     return (
       <TeamDetailScreen
         team={selectedTeam}
         userId={userId}
         onBack={() => { setSelectedTeam(null); loadTeams(); }}
+        onRefresh={loadTeams}
       />
     );
   }
 
-  const filteredTeams = teams.filter(t =>
+  const filtered = teams.filter(t =>
     t.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     (t.description ?? '').toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  // ── 로딩 ─────────────────────────────────────────────
   if (loading) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator color={C.text} size="large" />
+      <View style={styles.loadingWrap}>
+        <ActivityIndicator color={C.text} />
       </View>
     );
   }
 
+  // ── 렌더 ─────────────────────────────────────────────
   return (
-    <View style={styles.container}>
+    <View style={styles.root}>
       {/* 헤더 */}
-      <View style={styles.header}>
+      <View style={styles.listHeader}>
         <View>
-          <Text style={styles.headerLabel}>makeblack</Text>
-          <Text style={styles.headerTitle}>팀</Text>
+          <Text style={styles.listHeaderLabel}>makeblack</Text>
+          <Text style={styles.listHeaderTitle}>팀</Text>
         </View>
-        <TouchableOpacity style={styles.createBtn} onPress={() => setCreateModalVisible(true)}>
-          <Text style={styles.createBtnText}>+ 팀 만들기</Text>
-        </TouchableOpacity>
+        <View style={styles.headerBtnGroup}>
+          <TouchableOpacity style={styles.joinBtn} onPress={() => setShowJoin(true)}>
+            <Text style={styles.joinBtnText}>코드로 참여</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.createBtn} onPress={() => setShowCreate(true)}>
+            <Text style={styles.createBtnText}>+ 팀 만들기</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* 검색 */}
@@ -148,28 +260,33 @@ export default function TeamScreen() {
         />
       </View>
 
+      {/* 팀 목록 */}
       <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
         {teams.length === 0 ? (
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyEmoji}>👥</Text>
-            <Text style={styles.emptyTitle}>팀이 없어요</Text>
-            <Text style={styles.emptyDesc}>팀을 만들어 함께{'\n'}BLACK을 향해 가보세요</Text>
-            <TouchableOpacity style={styles.emptyBtn} onPress={() => setCreateModalVisible(true)}>
+          <View style={styles.emptyWrap}>
+            <Text style={styles.emptyIcon}>◈</Text>
+            <Text style={styles.emptyTitle}>아직 팀이 없어요</Text>
+            <Text style={styles.emptyDesc}>+ 팀 만들기로 시작해보세요</Text>
+            <TouchableOpacity style={styles.emptyBtn} onPress={() => setShowCreate(true)}>
               <Text style={styles.emptyBtnText}>+ 팀 만들기</Text>
             </TouchableOpacity>
           </View>
-        ) : filteredTeams.length === 0 ? (
-          <View style={styles.emptyContainer}>
+        ) : filtered.length === 0 ? (
+          <View style={styles.emptyWrap}>
             <Text style={styles.emptyTitle}>검색 결과가 없어요</Text>
           </View>
         ) : (
-          filteredTeams.map(team => {
-            const isDone = team.todayTotal > 0 && team.todayDrops.length >= team.todayTotal;
+          filtered.map(team => {
             const progress = team.todayTotal > 0 ? team.todayDrops.length / team.todayTotal : 0;
             return (
-              <TouchableOpacity key={team.id} style={styles.teamCard} onPress={() => setSelectedTeam(team)}>
-                <View style={styles.teamCardInner}>
-                  {/* 팔레트 미니 */}
+              <TouchableOpacity
+                key={team.id}
+                style={styles.teamCard}
+                onPress={() => setSelectedTeam(team)}
+                activeOpacity={0.75}
+              >
+                {/* 팔레트 미니 + 정보 */}
+                <View style={styles.teamCardRow}>
                   <View style={styles.teamCardCanvas}>
                     <PaletteCanvas
                       drops={team.todayDrops}
@@ -177,46 +294,39 @@ export default function TeamScreen() {
                       size={44}
                     />
                   </View>
-
-                  {/* 정보 */}
-                  <View style={styles.teamCardContent}>
-                    <View style={styles.teamCardTopRow}>
-                      <Text style={styles.teamCardName}>{team.name}</Text>
-                      <Text style={styles.teamCardArrow}>→</Text>
-                    </View>
+                  <View style={styles.teamCardInfo}>
+                    <Text style={styles.teamCardName}>{team.name}</Text>
                     {team.description ? (
                       <Text style={styles.teamCardDesc} numberOfLines={1}>{team.description}</Text>
                     ) : null}
-
-                    {/* 멤버 컬러 도트 */}
-                    <View style={styles.teamCardBottom}>
-                      <View style={styles.memberDotsRow}>
-                        {(team.members ?? []).slice(0, 6).map(m => (
-                          <View
-                            key={m.user_id}
-                            style={[styles.memberColorDot, { backgroundColor: getMemberColor(m.color_index).color }]}
-                          />
-                        ))}
-                        {(team.members ?? []).length > 6 && (
-                          <Text style={styles.memberMoreText}>+{team.members.length - 6}</Text>
-                        )}
-                      </View>
-
-                      {/* 진행바 */}
-                      <View style={styles.miniProgressWrap}>
-                        <View style={styles.miniProgressTrack}>
-                          <View style={[styles.miniProgressFill, {
-                            width: `${Math.min(progress * 100, 100)}%`,
-                            backgroundColor: isDone ? '#333' : C.text,
-                          }]} />
-                        </View>
-                        <Text style={styles.miniProgressText}>
-                          {team.todayDrops.length}/{team.todayTotal > 0 ? team.todayTotal : '0'}
-                        </Text>
-                      </View>
-                    </View>
                   </View>
+                  <Text style={styles.teamCardMemberCount}>{team.members.length}명</Text>
                 </View>
+
+                {/* 멤버 색 도트 */}
+                <View style={styles.memberDotsRow}>
+                  {team.members.slice(0, 6).map(m => (
+                    <View
+                      key={m.user_id}
+                      style={[styles.memberDot, { backgroundColor: getMemberColor(m.color_index).color }]}
+                    />
+                  ))}
+                  {team.members.length > 6 && (
+                    <Text style={styles.memberMore}>+{team.members.length - 6}</Text>
+                  )}
+                </View>
+
+                {/* 진행바 */}
+                {team.todayTotal > 0 && (
+                  <View style={styles.miniProgressWrap}>
+                    <View style={styles.miniProgressTrack}>
+                      <View style={[styles.miniProgressFill, { width: `${Math.min(progress * 100, 100)}%` }]} />
+                    </View>
+                    <Text style={styles.miniProgressText}>
+                      {team.todayDrops.length}/{team.todayTotal} 완료
+                    </Text>
+                  </View>
+                )}
               </TouchableOpacity>
             );
           })
@@ -225,106 +335,210 @@ export default function TeamScreen() {
       </ScrollView>
 
       {/* 팀 만들기 모달 */}
-      <Modal visible={createModalVisible} animationType="slide" transparent onRequestClose={() => setCreateModalVisible(false)}>
-        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setCreateModalVisible(false)}>
-          <TouchableOpacity activeOpacity={1} style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>팀 만들기</Text>
-            <View style={styles.fieldGroup}>
-              <Text style={styles.label}>팀 이름 *</Text>
-              <TextInput
-                style={styles.input}
-                value={newTeamName}
-                onChangeText={setNewTeamName}
-                placeholder="팀 이름 입력"
-                placeholderTextColor={C.dim}
-                autoFocus
-              />
-            </View>
-            <View style={styles.fieldGroup}>
-              <Text style={styles.label}>설명 (선택)</Text>
-              <TextInput
-                style={styles.input}
-                value={newTeamDesc}
-                onChangeText={setNewTeamDesc}
-                placeholder="팀 설명 입력"
-                placeholderTextColor={C.dim}
-              />
-            </View>
-            <TouchableOpacity
-              style={[styles.submitBtn, creating && styles.submitBtnDisabled]}
-              onPress={handleCreateTeam}
-              disabled={creating}
-            >
-              {creating ? <ActivityIndicator color="#0a0a0a" /> : <Text style={styles.submitBtnText}>만들기</Text>}
-            </TouchableOpacity>
+      {showCreate && (
+        <CreateTeamModal
+          onClose={() => setShowCreate(false)}
+          onCreate={handleCreateTeam}
+        />
+      )}
+
+      {/* 코드로 팀 참여 모달 */}
+      {showJoin && (
+        <Modal visible transparent animationType="slide" onRequestClose={closeJoinModal}>
+          <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={closeJoinModal}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+              <TouchableOpacity activeOpacity={1}>
+                <View style={styles.modalSheet}>
+                  <View style={styles.modalHandle} />
+
+                  {/* 단계 1 — 코드 입력 */}
+                  {joinStep === 'input' && (
+                    <>
+                      <View style={styles.modalTitleRow}>
+                        <Text style={styles.modalTitle}>코드로 팀 참여</Text>
+                        <TouchableOpacity onPress={closeJoinModal} style={styles.modalCloseBtn}>
+                          <Text style={styles.modalCloseBtnText}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+                      <Text style={styles.joinModalDesc}>
+                        팀 코드는 팀장의 ⋯ 메뉴 → 팀 코드 보기에서 확인할 수 있어요
+                      </Text>
+                      <TextInput
+                        style={styles.joinCodeInput}
+                        value={joinCode}
+                        onChangeText={t => setJoinCode(t.toUpperCase())}
+                        placeholder="팀 코드 입력 (예: A1B2C3D4)"
+                        placeholderTextColor={C.dim}
+                        autoCapitalize="characters"
+                        autoCorrect={false}
+                        maxLength={8}
+                        returnKeyType="search"
+                        onSubmitEditing={handleFindTeam}
+                      />
+                      <TouchableOpacity
+                        style={[styles.submitBtn, (joinCode.trim().length < 6 || joinSearching) && { opacity: 0.4 }]}
+                        onPress={handleFindTeam}
+                        disabled={joinCode.trim().length < 6 || joinSearching}
+                      >
+                        {joinSearching
+                          ? <ActivityIndicator color={C.bg} />
+                          : <Text style={styles.submitBtnText}>팀 찾기</Text>
+                        }
+                      </TouchableOpacity>
+                    </>
+                  )}
+
+                  {/* 단계 2 — 팀 미리보기 */}
+                  {joinStep === 'preview' && joinPreview && (
+                    <>
+                      <View style={styles.modalTitleRow}>
+                        <TouchableOpacity
+                          onPress={() => setJoinStep('input')}
+                          style={styles.modalBackBtn}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Text style={styles.modalBackBtnText}>‹</Text>
+                        </TouchableOpacity>
+                        <Text style={styles.modalTitle}>팀 확인</Text>
+                        <TouchableOpacity onPress={closeJoinModal} style={styles.modalCloseBtn}>
+                          <Text style={styles.modalCloseBtnText}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+
+                      <View style={styles.joinPreviewCard}>
+                        <Text style={styles.joinPreviewName}>{joinPreview.name}</Text>
+                        {joinPreview.description ? (
+                          <Text style={styles.joinPreviewDesc}>{joinPreview.description}</Text>
+                        ) : null}
+                        <Text style={styles.joinPreviewCode}>
+                          코드 {joinPreview.id.slice(0, 8).toUpperCase()}
+                        </Text>
+                      </View>
+
+                      {teams.some(t => t.id === joinPreview.id) ? (
+                        <View style={styles.joinAlreadyWrap}>
+                          <Text style={styles.joinAlreadyText}>이미 참여 중인 팀이에요</Text>
+                        </View>
+                      ) : (
+                        <>
+                          <Text style={styles.joinPreviewNote}>
+                            참여 요청을 보내면 방장이 수락 후 입장됩니다
+                          </Text>
+                          <TouchableOpacity
+                            style={[styles.submitBtn, joinSending && { opacity: 0.4 }]}
+                            onPress={handleSendJoinRequest}
+                            disabled={joinSending}
+                          >
+                            {joinSending
+                              ? <ActivityIndicator color={C.bg} />
+                              : <Text style={styles.submitBtnText}>참여 요청 보내기</Text>
+                            }
+                          </TouchableOpacity>
+                        </>
+                      )}
+                    </>
+                  )}
+                </View>
+              </TouchableOpacity>
+            </KeyboardAvoidingView>
           </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
+        </Modal>
+      )}
     </View>
   );
 }
 
 // ══════════════════════════════════════════════════════
-// 팀 상세 화면
+// 3단계 ▼ TeamDetailScreen — state + 데이터 로딩 + Realtime
 // ══════════════════════════════════════════════════════
-function TeamDetailScreen({ team, userId, onBack }) {
-  const [detail, setDetail] = useState(null);
-  const [categories, setCategories] = useState([]);
-  const [todos, setTodos] = useState([]);
+
+function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
+  const insets = useSafeAreaInsets();
+
+  // ── 기본 데이터 state ─────────────────────────────────
+  const [detail, setDetail]           = useState(null);
+  const [categories, setCategories]   = useState([]);
+  const [todos, setTodos]             = useState([]);
   const [paletteDrops, setPaletteDrops] = useState([]);
-  const [animDrop, setAnimDrop] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(dateKey());
-  const [loading, setLoading] = useState(true);
+  const [animDrop, setAnimDrop]       = useState(null);
+  const [loading, setLoading]         = useState(true);
   const [myColorIndex, setMyColorIndex] = useState(0);
 
-  // BLACK 달성
-  const [blackPhase, setBlackPhase] = useState(null);
-  const blackAnim = useRef(new Animated.Value(0)).current;
-  const blackScaleAnim = useRef(new Animated.Value(1.04)).current;
-  const blackTimer = useRef(null);
-  const prevIsBlack = useRef(false);
-  const [stampDate, setStampDate] = useState(null);
-  const stampScale = useRef(new Animated.Value(2.4)).current;
+  // ── 날짜 ─────────────────────────────────────────────
+  const [selectedDate, setSelectedDate] = useState(dateKey());
+  const todayKey = useMemo(() => dateKey(), []);
+
+  // ── BLACK 달성 ────────────────────────────────────────
+  const [blackPhase, setBlackPhase]   = useState(null); // null | 'in' | 'text' | 'orb' | 'stamp'
+  const blackFadeAnim  = useRef(new Animated.Value(0)).current;
+  const blackTextAnim  = useRef(new Animated.Value(0)).current;
+  const blackTimer     = useRef(null);
+  const prevIsBlack    = useRef(false);
+  const blackShownDates = useRef(new Set());
+
+  // ── 스탬프 애니메이션 ──────────────────────────────────
+  const [stampDate, setStampDate]     = useState(null);
+  const stampScale   = useRef(new Animated.Value(2.4)).current;
   const stampOpacity = useRef(new Animated.Value(0)).current;
-  const rippleScale = useRef(new Animated.Value(1)).current;
+  const rippleScale  = useRef(new Animated.Value(1)).current;
   const rippleOpacity = useRef(new Animated.Value(0.6)).current;
 
-  // 캘린더
-  const [showCal, setShowCal] = useState(false);
-  const calTransY = useRef(new Animated.Value(-SH)).current;
+  // ── 캘린더 ───────────────────────────────────────────
+  const [showCal, setShowCal]         = useState(false);
+  const [calClosing, setCalClosing]   = useState(false);
+  const calTransY = useRef(new Animated.Value(-SH * 0.5)).current;
+  const [viewMonth, setViewMonth]     = useState(() => {
+    const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() };
+  });
 
-  // Flying Orb
-  const [flyOrb, setFlyOrb] = useState(null);
+  // ── Flying Orb ───────────────────────────────────────
+  const [flyOrb, setFlyOrb]           = useState(null);
 
-  // 카테고리 모달
-  const [catModalVisible, setCatModalVisible] = useState(false);
-  const [newCatName, setNewCatName] = useState('');
+  // ── 캘린더 셀 ref (FlyingOrb 좌표 계산용) ─────────────
+  const targetCellRef = useRef(null);
+
+  // ── 참여 요청 (방장용) ────────────────────────────────
+  const [joinRequests, setJoinRequests] = useState([]);
+
+  // ── 카테고리 모달 ─────────────────────────────────────
+  const [showCatModal, setShowCatModal] = useState(false);
+  const [newCatName, setNewCatName]   = useState('');
   const [newCatColor, setNewCatColor] = useState(CAT_COLORS[0]);
 
-  // 할일 입력
+  // ── 할일 입력 ─────────────────────────────────────────
   const [addingCatId, setAddingCatId] = useState(null);
   const [newTodoText, setNewTodoText] = useState('');
+  const inputRef = useRef(null);
 
-  // 담당자 지정
-  const [selectedAssignee, setSelectedAssignee] = useState(null);
-  const [assigneeModalVisible, setAssigneeModalVisible] = useState(false);
+  // ── 담당자 지정 ───────────────────────────────────────
+  const [assigneeCatId, setAssigneeCatId] = useState(null); // 담당자 지정 중인 catId
+  const [selectedAssignee, setSelectedAssignee] = useState(null); // { user_id, color_index }
 
-  // 초대 모달
-  const [inviteModalVisible, setInviteModalVisible] = useState(false);
+  // ── 초대 모달 ─────────────────────────────────────────
+  const [showInvite, setShowInvite]   = useState(false);
   const [inviteQuery, setInviteQuery] = useState('');
-  const [inviteSearchResults, setInviteSearchResults] = useState([]);
-  const [inviting, setInviting] = useState(false);
+  const [inviteResults, setInviteResults] = useState([]);
+  const [inviting, setInviting]       = useState(false);
 
-  // 메뉴/수정 모달
-  const [menuVisible, setMenuVisible] = useState(false);
-  const [editModalVisible, setEditModalVisible] = useState(false);
-  const [editName, setEditName] = useState(team.name);
-  const [editDesc, setEditDesc] = useState(team.description ?? '');
+  // ── 메뉴 / 팀 수정 ────────────────────────────────────
+  const [showMenu, setShowMenu]       = useState(false);
+  const [showEditTeam, setShowEditTeam] = useState(false);
+  const [editName, setEditName]       = useState(team.name);
+  const [editDesc, setEditDesc]       = useState(team.description ?? '');
 
+  // ── Realtime 채널 ─────────────────────────────────────
   const channelRef = useRef(null);
-  const isOwner = detail?.created_by === userId;
 
+  // ── 파생 값 ──────────────────────────────────────────
+  const members  = detail?.team_members ?? [];
+  const isOwner  = detail?.created_by === userId;
+  const myColor  = getMemberColor(myColorIndex);
+  const isToday  = selectedDate === todayKey;
+  const doneCount  = todos.filter(t => t.done).length;
+  const totalCount = todos.length;
+  const isBlack  = totalCount > 0 && doneCount === totalCount;
+
+  // ── 초기 로드 ─────────────────────────────────────────
   useEffect(() => {
     loadAll();
     setupRealtime();
@@ -334,11 +548,20 @@ function TeamDetailScreen({ team, userId, onBack }) {
     };
   }, []);
 
+  // 날짜 변경 시 할일 + 팔레트 재로드
   useEffect(() => {
     if (!detail) return;
     loadTodos();
   }, [selectedDate, detail]);
 
+  // 날짜 변경 시 BLACK 상태 초기화
+  useEffect(() => {
+    setBlackPhase(null);
+    clearTimeout(blackTimer.current);
+    prevIsBlack.current = false;
+  }, [selectedDate]);
+
+  // ── 팀 상세 + 카테고리 로드 ──────────────────────────
   const loadAll = async () => {
     setLoading(true);
     try {
@@ -350,13 +573,18 @@ function TeamDetailScreen({ team, userId, onBack }) {
       setCategories(cats);
       const me = teamDetail.team_members?.find(m => m.user_id === userId);
       if (me) setMyColorIndex(me.color_index);
-    } catch (e) {
+      // 방장이면 참여 요청도 로드
+      if (teamDetail.created_by === userId) {
+        fetchPendingRequests(team.id).then(setJoinRequests).catch(() => {});
+      }
+    } catch {
       Alert.alert('오류', '팀 정보를 불러오지 못했어요');
     } finally {
       setLoading(false);
     }
   };
 
+  // ── 할일 + 팔레트 로드 ───────────────────────────────
   const loadTodos = async () => {
     try {
       const [todosData, palette] = await Promise.all([
@@ -365,12 +593,13 @@ function TeamDetailScreen({ team, userId, onBack }) {
       ]);
       setTodos(todosData);
       setPaletteDrops(palette.drops ?? []);
-    } catch (e) {}
+    } catch { /* 조용히 실패 */ }
   };
 
+  // ── Supabase Realtime 구독 ────────────────────────────
   const setupRealtime = () => {
     const channel = supabase
-      .channel(`team:${team.id}`)
+      .channel(`team-detail:${team.id}`)
       .on('postgres_changes', {
         event: '*', schema: 'public', table: 'team_todos',
         filter: `team_id=eq.${team.id}`,
@@ -379,226 +608,227 @@ function TeamDetailScreen({ team, userId, onBack }) {
         event: '*', schema: 'public', table: 'team_palette_history',
         filter: `team_id=eq.${team.id}`,
       }, (payload) => {
-        if (payload.new?.drops) setPaletteDrops(payload.new.drops);
+        if (payload.new?.date === selectedDate) {
+          setPaletteDrops(payload.new.drops ?? []);
+        }
       })
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'team_members',
+        filter: `team_id=eq.${team.id}`,
+      }, () => loadAll())
       .subscribe();
     channelRef.current = channel;
   };
 
-  const goDate = (n) => setSelectedDate(prev => addDays(prev, n));
+  // ── 날짜 이동 ─────────────────────────────────────────
+  const goDay = (delta) => {
+    const d = new Date(selectedDate + 'T00:00:00');
+    d.setDate(d.getDate() + delta);
+    const dk = dateKey(d);
+    setSelectedDate(dk);
+    setViewMonth({ y: d.getFullYear(), m: d.getMonth() });
+  };
 
-  // BLACK 감지
-  const isBlack = todos.length > 0 && todos.every(t => t.done);
-  useEffect(() => {
-    if (isBlack && !prevIsBlack.current) {
-      prevIsBlack.current = true;
-      startBlackSequence();
-    } else if (!isBlack) {
+  const goMonth = (delta) => setViewMonth(({ y, m }) => {
+    const d = new Date(y, m + delta, 1);
+    return { y: d.getFullYear(), m: d.getMonth() };
+  });
+
+  // ══════════════════════════════════════════════════════
+  // 4단계 ▼ 액션 핸들러
+  // ══════════════════════════════════════════════════════
+
+  /**
+   * handleToggleTeamTodo
+   * ① 낙관적 업데이트 (로컬 state 먼저)
+   * ② 완료: 담당자(또는 작성자) colorIndex 기반 drop 생성 → animDrop 트리거
+   *    취소: drop 제거 → blackShownDates key 삭제 → BLACK 초기화
+   * ③ Supabase team_todos / team_palette_history 동기화
+   * ④ 실패 시 롤백
+   */
+  const handleToggleTeamTodo = async (todo) => {
+    const willDone = !todo.done;
+    const dk = selectedDate;
+
+    // ── ① 낙관적 로컬 업데이트 ──
+    const prevTodos = todos;
+    const prevDrops = paletteDrops;
+    setTodos(prev => prev.map(t => t.id === todo.id ? { ...t, done: willDone } : t));
+
+    let newDrops = [...paletteDrops];
+    let newAnimDrop = null;
+
+    if (willDone) {
+      // 중복 drop 방지
+      if (!newDrops.some(d => d.id === todo.id)) {
+        // 담당자 > 작성자 > 현재 유저 순으로 colorIndex 결정
+        const assigneeIdx = (() => {
+          if (todo.assignee_id) {
+            const m = members.find(m => m.user_id === todo.assignee_id);
+            if (m) return m.color_index;
+          }
+          const author = members.find(m => m.user_id === todo.author_id);
+          return author ? author.color_index : myColorIndex;
+        })();
+
+        // todo에 저장된 색이 있으면 우선 사용, 없으면 담당자 색 기반 생성
+        const colorData =
+          todo.hue != null && Array.isArray(todo.rgb) && todo.rgb.length === 3
+            ? { hue: todo.hue, rgb: todo.rgb, color: todo.color }
+            : memberColorToDrop(assigneeIdx);
+
+        const px   = 0.12 + Math.random() * 0.76;
+        const py   = 0.12 + Math.random() * 0.76;
+        const seed = todo.seed ?? Math.random() * 99999;
+        const drop = { id: todo.id, ...colorData, px, py, seed };
+
+        newDrops    = [...newDrops, drop];
+        newAnimDrop = drop;
+      }
+    } else {
+      // 완료 취소 → drop 제거 + BLACK 상태 초기화
+      newDrops = newDrops.filter(d => d.id !== todo.id);
+      const key = `${team.id}:${dk}:${totalCount}`;
+      blackShownDates.current.delete(key);
+      setBlackPhase(null);
+      clearTimeout(blackTimer.current);
       prevIsBlack.current = false;
     }
-  }, [isBlack]);
 
-  const startBlackSequence = () => {
-    setBlackPhase('in');
-    blackAnim.setValue(0);
-    blackScaleAnim.setValue(1.04);
-    Animated.parallel([
-      Animated.timing(blackAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-      Animated.timing(blackScaleAnim, { toValue: 1, duration: 400, useNativeDriver: true }),
-    ]).start();
+    const newTotal = todos.length;
+    const newDone  = willDone
+      ? todos.filter(t => t.done).length + 1
+      : todos.filter(t => t.done).length - 1;
+    // isLast: 이번 toggle로 마지막 할일이 완료되는 순간
+    const isLast = willDone && newDone === newTotal && newTotal > 0;
 
-    blackTimer.current = setTimeout(() => {
-      setBlackPhase('out');
-      Animated.parallel([
-        Animated.timing(blackAnim, { toValue: 0, duration: 450, useNativeDriver: true }),
-        Animated.timing(blackScaleAnim, { toValue: 0.97, duration: 450, useNativeDriver: true }),
-      ]).start();
+    setPaletteDrops(newDrops);
 
-      blackTimer.current = setTimeout(() => {
-        openCalendar();
-        blackTimer.current = setTimeout(() => {
-          setBlackPhase(null);
-          launchOrb();
-        }, 250);
-      }, 150);
-    }, 1000);
-  };
+    // animDrop 트리거 — null flush 후 새 drop 주입
+    if (newAnimDrop) {
+      setAnimDrop(null);
+      setTimeout(() => setAnimDrop({ ...newAnimDrop, isLast }), 0);
+    }
 
-  const skipBlackSequence = () => {
-    clearTimeout(blackTimer.current);
-    setBlackPhase('out');
-    Animated.timing(blackAnim, { toValue: 0, duration: 450, useNativeDriver: true }).start(() => {
-      setBlackPhase(null);
-    });
-    openCalendar();
-    blackTimer.current = setTimeout(() => launchOrb(), 250);
-  };
-
-  const launchOrb = () => {
-    const [y, m, d] = selectedDate.split('-').map(Number);
-    const fDow = new Date(y, m - 1, 1).getDay();
-    const cellW = SW / 7;
-    const cellH = cellW / 0.9;
-    const gridTopY = 89;
-    const cellIdx = fDow + d - 1;
-    const col = cellIdx % 7;
-    const row = Math.floor(cellIdx / 7);
-    const tx = col * cellW + cellW / 2;
-    const ty = gridTopY + row * cellH + cellH / 2;
-    setFlyOrb({ sx: SW / 2, sy: SH / 2, tx, ty });
-  };
-
-  const handleOrbDone = () => {
-    setFlyOrb(null);
-    setStampDate(selectedDate);
-    stampScale.setValue(2.4);
-    stampOpacity.setValue(0);
-    rippleScale.setValue(1);
-    rippleOpacity.setValue(0.6);
-    Animated.parallel([
-      Animated.sequence([
-        Animated.spring(stampScale, { toValue: 0.85, useNativeDriver: true, friction: 8 }),
-        Animated.spring(stampScale, { toValue: 1.12, useNativeDriver: true }),
-        Animated.spring(stampScale, { toValue: 1, useNativeDriver: true }),
-      ]),
-      Animated.timing(stampOpacity, { toValue: 1, duration: 250, useNativeDriver: true }),
-    ]).start();
-    blackTimer.current = setTimeout(() => {
-      Animated.parallel([
-        Animated.timing(rippleScale, { toValue: 2.8, duration: 700, useNativeDriver: true }),
-        Animated.timing(rippleOpacity, { toValue: 0, duration: 700, useNativeDriver: true }),
-      ]).start();
-    }, 150);
-    blackTimer.current = setTimeout(() => {
-      setStampDate(null);
-      closeCalendar();
-    }, 400);
-  };
-
-  const openCalendar = () => {
-    setShowCal(true);
-    calTransY.setValue(-SH);
-    Animated.spring(calTransY, { toValue: 0, useNativeDriver: true, tension: 80, friction: 12 }).start();
-  };
-
-  const closeCalendar = () => {
-    Animated.timing(calTransY, { toValue: -SH, duration: 300, useNativeDriver: true }).start(() => setShowCal(false));
-  };
-
-  // 카테고리 추가
-  const handleAddCategory = async () => {
-    if (!newCatName.trim()) return;
+    // ── ② Supabase 동기화 (백그라운드) ──
     try {
-      const cat = await createTeamCategory(team.id, userId, newCatName.trim(), newCatColor);
-      setCategories(prev => [...prev, cat]);
-      setNewCatName('');
-    } catch (e) {
-      Alert.alert('오류', '카테고리 추가에 실패했어요');
+      await toggleTeamTodo(todo.id, willDone);
+      await upsertTeamPaletteHistory(team.id, dk, newDrops, newTotal);
+    } catch {
+      // ── ③ 롤백 ──
+      setTodos(prevTodos);
+      setPaletteDrops(prevDrops);
+      setAnimDrop(null);
+      Alert.alert('오류', '업데이트에 실패했어요');
     }
   };
 
-  // 할일 추가
-  const handleAddTodo = async (catId) => {
-    if (!newTodoText.trim()) { setAddingCatId(null); return; }
-    const usedHues = todos.map(t => t.hue).filter(Boolean);
-    const memberColor = getMemberColor(myColorIndex);
-    const colorData = generateTodoColor(memberColor.color, usedHues);
-    const assigneeId = selectedAssignee?.user_id ?? null;
+  /**
+   * handleAddTeamTodo
+   * ① 담당자 지정 (selectedAssignee 또는 본인)
+   * ② 담당자 colorIndex 기반 hue / rgb / color 생성
+   * ③ 낙관적 로컬 추가 (임시 id) → Supabase INSERT → 실제 id 교체
+   */
+  const handleAddTeamTodo = async (catId) => {
+    const text = newTodoText.trim();
+    if (!text) { setAddingCatId(null); return; }
 
-    const tempId = 'temp_' + Date.now();
-    setTodos(prev => [...prev, {
-      id: tempId, cat_id: catId, text: newTodoText.trim(),
-      done: false, author_id: userId, assignee_id: assigneeId, ...colorData,
-    }]);
+    // 담당자: 명시적으로 지정된 멤버 또는 현재 유저
+    const assignee = selectedAssignee ?? { user_id: userId, color_index: myColorIndex };
+    const colorData = memberColorToDrop(assignee.color_index);
+    const seed = (Math.floor(Math.random() * 99999) + 1) * 31;
+    const assigneeId = assignee.user_id !== userId ? assignee.user_id : null;
+
+    // 낙관적 추가
+    const tempId  = `temp_${Date.now()}`;
+    const newTodo = {
+      id: tempId,
+      team_id: team.id,
+      cat_id: catId,
+      author_id: userId,
+      assignee_id: assigneeId,
+      date: selectedDate,
+      text,
+      done: false,
+      ...colorData,
+      seed,
+    };
+    setTodos(prev => [...prev, newTodo]);
     setNewTodoText('');
     setAddingCatId(null);
     setSelectedAssignee(null);
 
     try {
-      const saved = await createTeamTodo(team.id, catId, userId, selectedDate, newTodoText.trim(), colorData, assigneeId);
-      setTodos(prev => prev.map(t => t.id === tempId ? saved : t));
-      await upsertTeamPaletteHistory(team.id, selectedDate, paletteDrops, todos.length + 1);
-    } catch (e) {
+      const created = await createTeamTodo(
+        team.id, catId, userId, selectedDate, text,
+        { ...colorData, seed },
+        assigneeId,
+      );
+      // 임시 id → 실제 id 교체
+      setTodos(prev => prev.map(t => t.id === tempId ? created : t));
+    } catch {
+      // 롤백
       setTodos(prev => prev.filter(t => t.id !== tempId));
       Alert.alert('오류', '할일 추가에 실패했어요');
     }
   };
 
-  // 할일 완료 토글
-  const handleToggleTodo = async (todo) => {
-    const newDone = !todo.done;
-    setTodos(prev => prev.map(t => t.id === todo.id ? { ...t, done: newDone } : t));
-    let newDrops;
-    if (newDone) {
-      const newDrop = {
-        id: todo.id, hue: todo.hue, rgb: todo.rgb, color: todo.color,
-        seed: todo.seed, px: 0.12 + Math.random() * 0.76, py: 0.12 + Math.random() * 0.76,
-      };
-      newDrops = [...paletteDrops, newDrop];
-      setAnimDrop(newDrop);
-    } else {
-      newDrops = paletteDrops.filter(d => d.id !== todo.id);
-      setAnimDrop(null);
-    }
+  /**
+   * handleDeleteTeamTodo
+   */
+  const handleDeleteTeamTodo = async (todoId) => {
+    const prevTodos = todos;
+    const prevDrops = paletteDrops;
+    setTodos(prev => prev.filter(t => t.id !== todoId));
+    const newDrops = paletteDrops.filter(d => d.id !== todoId);
     setPaletteDrops(newDrops);
     try {
-      await toggleTeamTodo(todo.id, newDone);
-      await upsertTeamPaletteHistory(team.id, selectedDate, newDrops, todos.length);
-    } catch (e) {
-      setTodos(prev => prev.map(t => t.id === todo.id ? { ...t, done: !newDone } : t));
-      setPaletteDrops(paletteDrops);
-      Alert.alert('오류', '완료 처리에 실패했어요');
-    }
-  };
-
-  // 할일 삭제
-  const handleDeleteTodo = async (todo) => {
-    if (todo.author_id !== userId && !isOwner) {
-      Alert.alert('권한 없음', '본인이 작성한 할일만 삭제할 수 있어요');
-      return;
-    }
-    setTodos(prev => prev.filter(t => t.id !== todo.id));
-    const newDrops = paletteDrops.filter(d => d.id !== todo.id);
-    setPaletteDrops(newDrops);
-    try {
-      await deleteTeamTodo(todo.id);
+      await deleteTeamTodo(todoId);
       await upsertTeamPaletteHistory(team.id, selectedDate, newDrops, todos.length - 1);
-    } catch (e) {
+    } catch {
+      setTodos(prevTodos);
+      setPaletteDrops(prevDrops);
       Alert.alert('오류', '삭제에 실패했어요');
-      loadTodos();
     }
   };
 
-  // 초대 검색
+  /**
+   * handleAnimDone — PaletteCanvas 애니메이션 완료 콜백
+   * wasLast이면 BLACK 달성 페이즈 시작
+   */
+  const handleAnimDone = useCallback(() => {
+    const wasLast = animDrop?.isLast;
+    setAnimDrop(null);
+    const key = `${team.id}:${selectedDate}:${totalCount}`;
+    if (wasLast && !blackShownDates.current.has(key)) {
+      blackShownDates.current.add(key);
+      setBlackPhase('in');
+    }
+  }, [animDrop, selectedDate, totalCount, team.id]);
+
+  // ── 멤버 초대 ─────────────────────────────────────────
   const handleInviteSearch = async (query) => {
     setInviteQuery(query);
-    if (!query.trim()) { setInviteSearchResults([]); return; }
+    if (!query.trim()) { setInviteResults([]); return; }
     try {
       const results = await searchUsers(query);
-      setInviteSearchResults(results);
-    } catch (e) {}
+      setInviteResults(results);
+    } catch (_) {}
   };
 
-  // 초대 실행
   const handleInviteUser = async (targetUser) => {
     const alreadyMember = detail?.team_members?.some(m => m.user_id === targetUser.id);
     if (alreadyMember) { Alert.alert('', '이미 팀원이에요'); return; }
+    const alreadyPending = joinRequests.some(r => r.requester_id === targetUser.id);
+    if (alreadyPending) { Alert.alert('', '이미 요청이 전송됐어요'); return; }
     setInviting(true);
     try {
-      const { data: members } = await supabase
-        .from('team_members').select('color_index').eq('team_id', team.id);
-      const usedIndices = members.map(m => m.color_index);
-      let idx = 0;
-      while (usedIndices.includes(idx)) idx++;
-      const { error } = await supabase
-        .from('team_members')
-        .insert({ team_id: team.id, user_id: targetUser.id, color_index: idx % 8 });
-      if (error) throw error;
-      Alert.alert('초대 완료', `${targetUser.name}님을 팀에 추가했어요`);
+      await createJoinRequest(team.id, targetUser.id);
+      setJoinRequests(prev => [...prev, { id: Date.now().toString(), team_id: team.id, requester_id: targetUser.id, status: 'pending', users: targetUser }]);
+      Alert.alert('초대 전송', `${targetUser.name}님께 초대 요청을 보냈어요.\n방장이 수락하면 팀에 참여돼요.`);
       setInviteQuery('');
-      setInviteSearchResults([]);
-      setInviteModalVisible(false);
-      loadAll();
+      setInviteResults([]);
+      setShowInvite(false);
     } catch (e) {
       Alert.alert('초대 실패', e.message);
     } finally {
@@ -606,651 +836,2213 @@ function TeamDetailScreen({ team, userId, onBack }) {
     }
   };
 
-  // 팀 수정
-  const handleEditTeam = async () => {
+  const handleAcceptRequest = async (req) => {
     try {
-      await updateTeam(team.id, editName.trim(), editDesc.trim());
-      setEditModalVisible(false);
-      setMenuVisible(false);
+      await acceptJoinRequest(req.id, team.id, req.requester_id);
+      setJoinRequests(prev => prev.filter(r => r.id !== req.id));
       loadAll();
+      onRefresh?.();
     } catch (e) {
-      Alert.alert('오류', '팀 정보 수정에 실패했어요');
+      Alert.alert('오류', '수락에 실패했어요');
     }
   };
 
-  // 팀 삭제
-  const handleDeleteTeam = () => {
-    Alert.alert('팀 삭제', `"${team.name}"을 삭제할까요?`, [
-      { text: '취소', style: 'cancel' },
-      { text: '삭제', style: 'destructive', onPress: async () => {
-        try { await deleteTeam(team.id); onBack(); }
-        catch (e) { Alert.alert('오류', '팀 삭제에 실패했어요'); }
-      }}
-    ]);
+  const handleRejectRequest = async (req) => {
+    try {
+      await rejectJoinRequest(req.id);
+      setJoinRequests(prev => prev.filter(r => r.id !== req.id));
+    } catch (e) {
+      Alert.alert('오류', '거절에 실패했어요');
+    }
   };
 
-  // 팀 나가기
-  const handleLeaveTeam = () => {
-    Alert.alert('팀 나가기', `"${team.name}"에서 나갈까요?`, [
-      { text: '취소', style: 'cancel' },
-      { text: '나가기', style: 'destructive', onPress: async () => {
-        try { await leaveTeam(team.id, userId); onBack(); }
-        catch (e) { Alert.alert('오류', '팀 나가기에 실패했어요'); }
-      }}
-    ]);
+  // ══════════════════════════════════════════════════════
+  // 5단계 ▼ 캘린더 + BLACK 페이즈
+  // ══════════════════════════════════════════════════════
+
+  // 팀 팔레트 히스토리 (캘린더 셀 표시용)
+  const [monthHistory, setMonthHistory] = useState({});
+
+  // 월 변경 시 team_palette_history 로드
+  useEffect(() => {
+    if (!detail) return;
+    const { y, m } = viewMonth;
+    const pad = n => String(n).padStart(2, '0');
+    const startDate = `${y}-${pad(m + 1)}-01`;
+    const endDate   = `${y}-${pad(m + 1)}-${new Date(y, m + 1, 0).getDate()}`;
+    supabase
+      .from('team_palette_history')
+      .select('date, drops, total')
+      .eq('team_id', team.id)
+      .gte('date', startDate)
+      .lte('date', endDate)
+      .then(({ data }) => {
+        const map = {};
+        (data ?? []).forEach(row => { map[row.date] = { drops: row.drops ?? [], total: row.total ?? 0 }; });
+        setMonthHistory(map);
+      });
+  }, [viewMonth, detail]);
+
+  // 현재 날짜의 팔레트 변경 시 monthHistory 동기화
+  useEffect(() => {
+    setMonthHistory(prev => ({
+      ...prev,
+      [selectedDate]: { drops: paletteDrops, total: totalCount },
+    }));
+  }, [paletteDrops, totalCount]);
+
+  // ── 캘린더 계산값 ─────────────────────────────────────
+  const calYear     = viewMonth.y;
+  const calMonth    = viewMonth.m;
+  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+  const firstDow    = new Date(calYear, calMonth, 1).getDay(); // 일요일=0
+  const monthName   = new Date(calYear, calMonth, 1).toLocaleString('ko-KR', { month: 'long' });
+
+  // ── 캘린더 열기 / 닫기 ───────────────────────────────
+  const openCalendar = () => {
+    calTransY.setValue(-SH * 0.5);
+    setShowCal(true);
+    Animated.timing(calTransY, {
+      toValue: 0, duration: 220,
+      useNativeDriver: true,
+    }).start();
   };
 
-  const doneTodos = todos.filter(t => t.done);
+  const closeCalendar = (cb) => {
+    setCalClosing(true);
+    Animated.timing(calTransY, {
+      toValue: -SH * 0.5, duration: 220,
+      useNativeDriver: true,
+    }).start(() => {
+      setShowCal(false);
+      setCalClosing(false);
+      if (cb) cb();
+    });
+  };
 
-  // 캘린더 계산
-  const todayStr = dateKey();
-  const [calYear, calMonthNum] = selectedDate.split('-').map(Number);
-  const viewYear = calYear;
-  const viewMonth = calMonthNum - 1;
-  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
-  const firstDow = new Date(viewYear, viewMonth, 1).getDay();
+  // ── getTargetCellPos — measureInWindow 없이 수학으로 셀 중심 계산 ──
+  // index.js와 동일한 로직 (calSheet paddingTop=20, paddingHorizontal=18)
+  const getTargetCellPos = (dateStr) => {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const firstDay  = new Date(y, m - 1, 1).getDay();
+    const cellIndex = firstDay + d - 1;
+    const col = cellIndex % 7;
+    const row = Math.floor(cellIndex / 7);
 
-  if (loading) {
-    return <View style={styles.loadingContainer}><ActivityIndicator color={C.text} size="large" /></View>;
-  }
+    const cellW = (SW - 36) / 7;  // paddingHorizontal 18×2
+    const cellH = 50;              // paddingVertical(6) + circle(30) + gap(2) + dayNum(12)
+    const ROW_GAP = 3;
 
-  return (
-    <View style={styles.container}>
-      {/* 헤더 */}
-      <View style={styles.detailHeader}>
-        <TouchableOpacity onPress={onBack} style={styles.backBtn}>
-          <Text style={styles.backBtnText}>←</Text>
-        </TouchableOpacity>
-        <View style={styles.detailHeaderCenter}>
-          <Text style={styles.detailTeamName}>{detail?.name ?? team.name}</Text>
-          {detail?.description ? <Text style={styles.detailTeamDesc}>{detail.description}</Text> : null}
-        </View>
-        <TouchableOpacity onPress={() => setMenuVisible(true)} style={styles.menuBtn}>
-          <Text style={styles.menuBtnText}>···</Text>
-        </TouchableOpacity>
-      </View>
+    const sheetTop = insets.top + 20;
+    const headerH  = 70;
 
-      {/* 멤버 아바타 */}
-      <View style={styles.membersRow}>
-        {detail?.team_members?.map(m => (
-          <View key={m.user_id} style={[styles.memberAvatar, { backgroundColor: getMemberColor(m.color_index).color }]}>
-            <Text style={styles.memberAvatarText}>{m.users?.name?.[0]?.toUpperCase() ?? '?'}</Text>
-          </View>
+    const cellX = 18 + col * cellW + cellW / 2;
+    const cellY = sheetTop + headerH + row * (cellH + ROW_GAP) + cellH / 2;
+
+    return { x: cellX, y: cellY };
+  };
+
+  // ── BLACK 페이즈 useEffect ────────────────────────────
+
+  // 'in' — 검정 오버레이 페이드인 + 캘린더 열기
+  useEffect(() => {
+    if (blackPhase !== 'in') return;
+    blackFadeAnim.setValue(0);
+    openCalendar();
+    Animated.timing(blackFadeAnim, {
+      toValue: 0.6, duration: 300, useNativeDriver: true,
+    }).start(({ finished }) => {
+      if (finished) setBlackPhase('text');
+    });
+  }, [blackPhase]);
+
+  // 'text' — 200ms 페이드인 → 700ms 표시 → 200ms 페이드아웃 → 'orb'
+  useEffect(() => {
+    if (blackPhase !== 'text') return;
+    blackTextAnim.setValue(0);
+    Animated.timing(blackTextAnim, {
+      toValue: 1, duration: 200, useNativeDriver: true,
+    }).start(() => {
+      blackTimer.current = setTimeout(() => {
+        Animated.timing(blackTextAnim, {
+          toValue: 0, duration: 200, useNativeDriver: true,
+        }).start(({ finished }) => {
+          if (finished) setBlackPhase('orb');
+        });
+      }, 700);
+    });
+    return () => clearTimeout(blackTimer.current);
+  }, [blackPhase]);
+
+  // 'orb' — 수학 계산으로 셀 중심 좌표 결정
+  useEffect(() => {
+    if (blackPhase !== 'orb') return;
+    const pos = getTargetCellPos(selectedDate);
+    setFlyOrb({ toX: pos.x, toY: pos.y });
+  }, [blackPhase]);
+
+  // 'stamp' — 스탬프 리플 + 오버레이 페이드아웃
+  useEffect(() => {
+    if (blackPhase !== 'stamp') return;
+    setFlyOrb(null);
+    setStampDate(selectedDate);
+
+    Animated.timing(blackFadeAnim, {
+      toValue: 0, duration: 500, useNativeDriver: true,
+    }).start();
+
+    stampScale.setValue(2.4);
+    stampOpacity.setValue(0);
+    rippleScale.setValue(1);
+    rippleOpacity.setValue(0.6);
+    Animated.parallel([
+      Animated.timing(stampScale,   { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.timing(stampOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+      Animated.sequence([
+        Animated.delay(80),
+        Animated.parallel([
+          Animated.timing(rippleScale,   { toValue: 2.2, duration: 300, useNativeDriver: true }),
+          Animated.timing(rippleOpacity, { toValue: 0,   duration: 300, useNativeDriver: true }),
+        ]),
+      ]),
+    ]).start(() => {
+      blackTimer.current = setTimeout(() => {
+        closeCalendar();
+        setBlackPhase(null);
+        setStampDate(null);
+      }, 250);
+    });
+
+    return () => { if (blackTimer.current) clearTimeout(blackTimer.current); };
+  }, [blackPhase, selectedDate]);
+
+  // ── renderCalendarMiniPalette ─────────────────────────
+  // index.js와 동일 — Canvas 대신 색상 blob 근사 렌더링
+  const renderCalendarMiniPalette = (drops, total, isDone, size = 30) => {
+    const opacity = isDone
+      ? 1
+      : 0.35 + (drops.length / (total || drops.length)) * 0.65;
+
+    const positions = [
+      { top: -size * 0.06, left:  -size * 0.06 },
+      { top: -size * 0.06, right: -size * 0.06 },
+      { bottom: -size * 0.06, left:  -size * 0.06 },
+      { bottom: -size * 0.06, right: -size * 0.06 },
+    ];
+
+    return (
+      <View style={{ width: size, height: size, borderRadius: size / 2, overflow: 'hidden', opacity }}>
+        <View style={[StyleSheet.absoluteFill, { backgroundColor: '#0d0c0b', borderRadius: size / 2 }]} />
+        {drops.slice(0, 4).map((d, i) => (
+          <View
+            key={d.id ?? i}
+            style={[
+              { position: 'absolute', width: size * 0.72, height: size * 0.72,
+                borderRadius: size * 0.36, backgroundColor: d.color, opacity: 0.68 },
+              positions[i % 4],
+            ]}
+          />
         ))}
-        <TouchableOpacity style={styles.inviteBtn} onPress={() => setInviteModalVisible(true)}>
-          <Text style={styles.inviteBtnText}>+ 초대</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* 날짜 네비 */}
-      <View style={styles.dateNav}>
-        <TouchableOpacity onPress={() => goDate(-1)} style={styles.dateBtn}>
-          <Text style={styles.dateBtnText}>◀</Text>
-        </TouchableOpacity>
-        <Text style={styles.dateLabel}>{formatDateLabel(selectedDate)}</Text>
-        <TouchableOpacity onPress={() => goDate(1)} style={styles.dateBtn}>
-          <Text style={styles.dateBtnText}>▶</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* 팔레트 프리뷰 */}
-      <View style={{ alignItems: 'center', marginHorizontal: 20, marginBottom: 16, gap: 10 }}>
-        <PaletteCanvas
-          drops={paletteDrops}
-          totalCount={todos.length}
-          size={160}
-          animDrop={animDrop}
-        />
-        <View style={{ width: 160, gap: 6 }}>
-          <View style={styles.progressBar}>
-            <View style={[styles.progressFill, {
-              width: todos.length > 0 ? `${(doneTodos.length / todos.length) * 100}%` : '0%',
-              backgroundColor: isBlack ? '#333' : C.text,
-            }]} />
-          </View>
-          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-            <View style={{ flexDirection: 'row', gap: 4, flex: 1 }}>
-              {paletteDrops.slice(0, 10).map(d => (
-                <View key={d.id} style={{
-                  width: 8, height: 8, borderRadius: 4,
-                  backgroundColor: d.color ?? '#888',
-                  shadowColor: d.color ?? '#888',
-                  shadowOpacity: 0.5,
-                  shadowRadius: 3,
-                  shadowOffset: { width: 0, height: 0 },
-                }} />
-              ))}
-              {paletteDrops.length > 10 && <Text style={{ fontSize: 9, color: C.dim }}>+{paletteDrops.length - 10}</Text>}
-            </View>
-            <Text style={styles.progressText}>{doneTodos.length} / {todos.length}</Text>
-          </View>
-        </View>
-      </View>
-
-      {/* 할일 목록 */}
-      <View style={styles.listHeader}>
-        <Text style={styles.listTitle}>팀 할일</Text>
-        <TouchableOpacity style={styles.catBtn} onPress={() => setCatModalVisible(true)}>
-          <Text style={styles.catBtnText}>카테고리</Text>
-        </TouchableOpacity>
-      </View>
-
-      <ScrollView style={styles.scroll} showsVerticalScrollIndicator={false}>
-        {categories.length === 0 && (
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyEmoji}>📋</Text>
-            <Text style={styles.emptyTitle}>카테고리를 만들어보세요</Text>
-            <TouchableOpacity style={styles.emptyBtn} onPress={() => setCatModalVisible(true)}>
-              <Text style={styles.emptyBtnText}>+ 카테고리 추가</Text>
-            </TouchableOpacity>
-          </View>
+        {isDone && (
+          <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.82)', borderRadius: size / 2 }]} />
         )}
+      </View>
+    );
+  };
 
-        {categories.map(cat => {
-          const catTodos = todos.filter(t => t.cat_id === cat.id);
-          return (
-            <View key={cat.id} style={styles.catSection}>
-              <View style={styles.catHeader}>
-                <View style={[styles.catDot, { backgroundColor: cat.color }]} />
-                <Text style={styles.catName}>{cat.name}</Text>
-                <TouchableOpacity style={styles.addTodoBtn} onPress={() => { setAddingCatId(cat.id); setNewTodoText(''); setSelectedAssignee(null); }}>
-                  <Text style={styles.addTodoBtnText}>+</Text>
+  // ── renderCalendarView ─ absoluteFill (index.js와 동일) ──
+  const renderCalendarView = () => {
+    if (!showCal && !calClosing) return null;
+
+    const DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+    const emptyCells = Array.from({ length: firstDow });
+    const dayCells   = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+
+    return (
+      <View
+        style={[StyleSheet.absoluteFill, { zIndex: 100 }]}
+        pointerEvents={showCal ? 'auto' : 'none'}
+      >
+        <TouchableOpacity style={calStyles.calOverlay} activeOpacity={1} onPress={() => closeCalendar()}>
+          <Animated.View style={[calStyles.calSheet, { transform: [{ translateY: calTransY }] }]}>
+            <TouchableOpacity activeOpacity={1} onPress={() => {}}>
+
+              {/* 월 이동 헤더 */}
+              <View style={calStyles.calHeader}>
+                <TouchableOpacity onPress={() => goMonth(-1)} style={calStyles.calNavBtn}>
+                  <Text style={calStyles.calNavText}>‹</Text>
+                </TouchableOpacity>
+                <Text style={calStyles.calTitle}>{calYear}년 {monthName}</Text>
+                <TouchableOpacity onPress={() => goMonth(1)} style={calStyles.calNavBtn}>
+                  <Text style={calStyles.calNavText}>›</Text>
                 </TouchableOpacity>
               </View>
 
-              {/* 할일 입력 */}
-              {addingCatId === cat.id && (
-                <View style={styles.todoInputArea}>
-                  <View style={styles.todoInputRow}>
-                    <TextInput
-                      style={styles.todoInput}
-                      value={newTodoText}
-                      onChangeText={setNewTodoText}
-                      placeholder="할일 입력..."
-                      placeholderTextColor={C.dim}
-                      autoFocus
-                      onSubmitEditing={() => handleAddTodo(cat.id)}
-                      returnKeyType="done"
-                    />
-                    <TouchableOpacity style={styles.todoInputDone} onPress={() => handleAddTodo(cat.id)}>
-                      <Text style={styles.todoInputDoneText}>↵</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={styles.todoInputCancel} onPress={() => { setAddingCatId(null); setSelectedAssignee(null); }}>
-                      <Text style={styles.todoInputCancelText}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-                  {/* 담당자 선택 */}
-                  <TouchableOpacity style={styles.assigneeRow} onPress={() => setAssigneeModalVisible(true)}>
-                    {selectedAssignee ? (
-                      <View style={styles.assigneeSelected}>
-                        <View style={[styles.assigneeDot, { backgroundColor: getMemberColor(selectedAssignee.color_index ?? 0).color }]} />
-                        <Text style={styles.assigneeSelectedText}>{selectedAssignee.users?.name ?? '멤버'}</Text>
-                        <TouchableOpacity onPress={() => setSelectedAssignee(null)}>
-                          <Text style={styles.assigneeClear}>✕</Text>
-                        </TouchableOpacity>
-                      </View>
-                    ) : (
-                      <Text style={styles.assigneePlaceholder}>👤 담당자 지정 (선택)</Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-              )}
-
-              {/* 할일 목록 */}
-              {catTodos.map(todo => {
-                const authorMember = detail?.team_members?.find(m => m.user_id === todo.author_id);
-                const assigneeMember = detail?.team_members?.find(m => m.user_id === todo.assignee_id);
-                const showMember = assigneeMember ?? authorMember;
-                const showColor = showMember ? getMemberColor(showMember.color_index).color : '#888';
-                const isAssignee = !!assigneeMember;
-                return (
-                  <View key={todo.id} style={styles.todoRow}>
-                    <TouchableOpacity
-                      style={[styles.checkbox, todo.done && { backgroundColor: todo.color ?? '#888', borderColor: todo.color ?? '#888' }]}
-                      onPress={() => handleToggleTodo(todo)}
-                    >
-                      {todo.done && <Text style={styles.checkmark}>✓</Text>}
-                    </TouchableOpacity>
-                    <Text style={[styles.todoText, todo.done && styles.todoTextDone]}>{todo.text}</Text>
-                    <View style={[
-                      styles.authorBadge,
-                      { backgroundColor: isAssignee ? 'transparent' : showColor },
-                      isAssignee && { borderWidth: 1.5, borderColor: showColor }
-                    ]}>
-                      <Text style={[styles.authorBadgeText, isAssignee && { color: showColor }]}>
-                        {showMember?.users?.name?.[0]?.toUpperCase() ?? '?'}
-                      </Text>
-                    </View>
-                    <TouchableOpacity style={styles.deleteBtn} onPress={() => handleDeleteTodo(todo)}>
-                      <Text style={styles.deleteBtnText}>✕</Text>
-                    </TouchableOpacity>
-                  </View>
-                );
-              })}
-
-              {catTodos.length === 0 && addingCatId !== cat.id && (
-                <Text style={styles.catEmptyText}>+ 버튼으로 할일을 추가해요</Text>
-              )}
-            </View>
-          );
-        })}
-        <View style={{ height: 100 }} />
-      </ScrollView>
-
-      {/* BLACK 오버레이 */}
-      {blackPhase && (
-        <Animated.View style={[styles.blackOverlay, { opacity: blackAnim, transform: [{ scale: blackScaleAnim }] }]}>
-          <TouchableOpacity style={styles.blackContent} activeOpacity={1} onPress={skipBlackSequence}>
-            <Animated.View style={[styles.blackOrb, {
-              backgroundColor: blackPhase === 'out' ? '#000' : '#fff',
-              shadowOpacity: blackPhase === 'out' ? 0 : 0.4,
-            }]} />
-            <Text style={styles.blackTitle}>BLACK</Text>
-            <Text style={styles.blackSub}>모든 색이 하나가 됐어요</Text>
-          </TouchableOpacity>
-        </Animated.View>
-      )}
-
-      {/* Flying Orb */}
-      {flyOrb && (
-        <FlyingOrb
-          sx={flyOrb.sx}
-          sy={flyOrb.sy}
-          tx={flyOrb.tx}
-          ty={flyOrb.ty}
-          onDone={handleOrbDone}
-        />
-      )}
-
-      {/* 캘린더 시트 */}
-      {showCal && (
-        <TouchableOpacity style={styles.calOverlay} activeOpacity={1} onPress={closeCalendar}>
-          <Animated.View style={[styles.calSheet, { transform: [{ translateY: calTransY }] }]}>
-            <TouchableOpacity activeOpacity={1}>
-              <View style={styles.calHeader2}>
-                <TouchableOpacity style={styles.calNavBtn} onPress={() => {}}>
-                  <Text style={styles.calNavTxt}>‹</Text>
-                </TouchableOpacity>
-                <Text style={styles.calTitle}>
-                  {viewYear}년 {new Date(viewYear, viewMonth, 1).toLocaleString('ko-KR', { month: 'long' })}
-                </Text>
-                <TouchableOpacity style={styles.calNavBtn} onPress={() => {}}>
-                  <Text style={styles.calNavTxt}>›</Text>
-                </TouchableOpacity>
-              </View>
-              <View style={styles.calDowRow}>
-                {['일','월','화','수','목','금','토'].map((d, i) => (
-                  <Text key={d} style={[styles.calDow, i===0 && { color:'#ff7070' }, i===6 && { color:'#7090ff' }]}>{d}</Text>
+              {/* 요일 헤더 */}
+              <View style={calStyles.calDowRow}>
+                {DOW_LABELS.map((d, i) => (
+                  <Text
+                    key={d}
+                    style={[calStyles.calDowText, i === 0 && { color: '#ff7070' }, i === 6 && { color: '#7090ff' }]}
+                  >
+                    {d}
+                  </Text>
                 ))}
               </View>
-              <View style={styles.calGrid}>
-                {Array.from({ length: firstDow }).map((_, i) => (
-                  <View key={`e${i}`} style={styles.calCell} />
-                ))}
-                {Array.from({ length: daysInMonth }, (_, i) => i + 1).map(day => {
-                  const dk = `${viewYear}-${String(viewMonth+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
-                  const isSel = dk === selectedDate;
-                  const isTod = dk === todayStr;
-                  const isStamp = stampDate === dk;
-                  const dow = new Date(dk + 'T00:00:00').getDay();
-                  const numColor = dow === 0 ? '#ff7070' : dow === 6 ? '#7090ff' : isSel ? C.text : '#3a3a3a';
+
+              {/* 날짜 그리드 */}
+              <View style={calStyles.calGrid}>
+                {emptyCells.map((_, i) => <View key={`e${i}`} style={calStyles.calCell} />)}
+
+                {dayCells.map(day => {
+                  const dk  = `${calYear}-${String(calMonth + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                  const isSel  = dk === selectedDate;
+                  const isTod  = dk === todayKey;
+                  const hist   = monthHistory[dk];
+                  const drops  = hist?.drops ?? [];
+                  const total  = hist?.total ?? 0;
+                  const dow    = new Date(dk + 'T00:00:00').getDay();
+                  const isDone = total > 0 && drops.length >= total;
+                  const hasDrops = drops.length > 0;
+                  const isStamp  = stampDate === dk;
+
+                  const numColor =
+                    dow === 0 ? '#ff7070'
+                    : dow === 6 ? '#7090ff'
+                    : hasDrops && !isDone ? C.text
+                    : isDone ? '#444444'
+                    : '#3a3a3a';
+
+                  const cellBorder = hasDrops && !isDone
+                    ? { borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)' }
+                    : isDone
+                    ? { borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' }
+                    : {};
+
                   return (
                     <TouchableOpacity
                       key={day}
-                      style={[styles.calCell, isSel && styles.calCellSel]}
+                      ref={isSel ? targetCellRef : null}
                       onPress={() => { setSelectedDate(dk); closeCalendar(); }}
+                      style={[calStyles.calCell, isSel && calStyles.calCellSel, cellBorder]}
+                      activeOpacity={0.7}
                     >
-                      <Animated.View style={[
-                        styles.calDayCircle,
-                        isTod && styles.calDayToday,
-                        isStamp && { transform: [{ scale: stampScale }], opacity: stampOpacity },
-                      ]}>
-                        {isTod && <View style={styles.calTodayDot} />}
+                      <Animated.View
+                        style={[
+                          calStyles.calCircle,
+                          isStamp && { transform: [{ scale: stampScale }], opacity: stampOpacity },
+                        ]}
+                      >
+                        {hasDrops ? (
+                          renderCalendarMiniPalette(drops, total, isDone, 30)
+                        ) : (
+                          <View style={[
+                            calStyles.calCirclePlain,
+                            isTod && calStyles.calCircleToday,
+                            isSel && !isTod && calStyles.calCircleSel,
+                          ]}>
+                            {isTod && <View style={calStyles.calTodayDot} />}
+                          </View>
+                        )}
+                        {isDone && hasDrops && <View style={calStyles.calDoneRing} />}
                         {isStamp && (
-                          <Animated.View style={[styles.ripple, {
-                            transform: [{ scale: rippleScale }],
-                            opacity: rippleOpacity,
-                          }]} />
+                          <Animated.View style={[
+                            calStyles.calRipple,
+                            { transform: [{ scale: rippleScale }], opacity: rippleOpacity },
+                          ]} />
                         )}
                       </Animated.View>
-                      <Text style={[styles.calDayNum, { color: numColor }, isTod && { fontWeight: '700' }]}>
+
+                      <Text
+                        style={[
+                          calStyles.calDayNum,
+                          { color: numColor },
+                          (isTod || (hasDrops && !isDone)) && { fontWeight: '600' },
+                        ]}
+                      >
                         {day}
                       </Text>
                     </TouchableOpacity>
                   );
                 })}
               </View>
+
             </TouchableOpacity>
           </Animated.View>
         </TouchableOpacity>
-      )}
+      </View>
+    );
+  };
 
-      {/* 담당자 선택 모달 */}
-      <Modal visible={assigneeModalVisible} animationType="slide" transparent onRequestClose={() => setAssigneeModalVisible(false)}>
-        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setAssigneeModalVisible(false)}>
-          <TouchableOpacity activeOpacity={1} style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>담당자 지정</Text>
-            <FlatList
-              data={detail?.team_members ?? []}
-              keyExtractor={item => item.user_id}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={styles.memberListRow}
-                  onPress={() => { setSelectedAssignee(item); setAssigneeModalVisible(false); }}
-                >
-                  <View style={[styles.memberAvatar, { backgroundColor: getMemberColor(item.color_index).color, width: 32, height: 32, borderRadius: 16 }]}>
-                    <Text style={styles.memberAvatarText}>{item.users?.name?.[0]?.toUpperCase() ?? '?'}</Text>
-                  </View>
-                  <Text style={styles.memberListName}>{item.users?.name}</Text>
-                  <Text style={styles.memberListHandle}>{item.users?.handle}</Text>
-                  {selectedAssignee?.user_id === item.user_id && <Text style={{ color: C.text }}>✓</Text>}
-                </TouchableOpacity>
-              )}
-            />
-          </TouchableOpacity>
-        </TouchableOpacity>
+  // ── renderBlackModal ─ BLACK 오버레이 + FlyingOrb (index.js와 동일) ──
+  const renderBlackModal = () => {
+    if (blackPhase === null) return null;
+    return (
+      <Modal visible transparent animationType="none" statusBarTranslucent>
+        {/* 검정 오버레이 */}
+        <Animated.View
+          pointerEvents="none"
+          style={[StyleSheet.absoluteFill, { backgroundColor: '#000', opacity: blackFadeAnim }]}
+        />
+
+        {/* 'text' 페이즈: BLACK 메시지 */}
+        {blackPhase === 'text' && (
+          <Animated.View
+            pointerEvents="none"
+            style={[StyleSheet.absoluteFill, calStyles.blackMsgWrap, { opacity: blackTextAnim }]}
+          >
+            <View style={calStyles.blackOrbCircle} />
+            <Text style={calStyles.blackTitle}>BLACK</Text>
+            <Text style={calStyles.blackSub}>팀이 해냈어요</Text>
+          </Animated.View>
+        )}
+
+        {/* FlyingOrb */}
+        {flyOrb && blackPhase === 'orb' && (
+          <FlyingOrb
+            sx={SW / 2}
+            sy={SH / 2}
+            tx={flyOrb.toX}
+            ty={flyOrb.toY}
+            onDone={() => setTimeout(() => setBlackPhase('stamp'), 400)}
+          />
+        )}
       </Modal>
+    );
+  };
 
-      {/* 초대 모달 */}
-      <Modal visible={inviteModalVisible} animationType="slide" transparent onRequestClose={() => setInviteModalVisible(false)}>
-        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setInviteModalVisible(false)}>
-          <TouchableOpacity activeOpacity={1} style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>멤버 초대</Text>
-            <Text style={styles.modalDesc}>이름 또는 @아이디로 검색해요</Text>
-            <TextInput
-              style={[styles.catInput, { marginBottom: 12 }]}
-              value={inviteQuery}
-              onChangeText={handleInviteSearch}
-              placeholder="이름 또는 @아이디"
-              placeholderTextColor={C.dim}
-              autoCapitalize="none"
-              autoFocus
-            />
-            {inviteSearchResults.length > 0 && (
-              <View style={styles.searchResultBox}>
-                {inviteSearchResults.map(u => {
-                  const alreadyMember = detail?.team_members?.some(m => m.user_id === u.id);
+  // ══════════════════════════════════════════════════════
+  // 6단계 ▼ 파생 값 + 카테고리 액션 + 렌더
+  // ══════════════════════════════════════════════════════
+
+  const PALETTE_SIZE = 160;
+
+  const todosByCat = useMemo(() => {
+    const map = {};
+    categories.forEach(cat => { map[cat.id] = []; });
+    todos.forEach(todo => {
+      if (!map[todo.cat_id]) map[todo.cat_id] = [];
+      map[todo.cat_id].push(todo);
+    });
+    return map;
+  }, [categories, todos]);
+
+  const progress   = totalCount > 0 ? Math.round(doneCount / totalCount * 100) : 0;
+  const selDateObj = new Date(selectedDate + 'T00:00:00');
+
+  // ── 카테고리 추가 / 삭제 ──────────────────────────────
+  const handleAddCategory = async () => {
+    if (!newCatName.trim()) return;
+    try {
+      const cat = await createTeamCategory(team.id, userId, newCatName.trim(), newCatColor);
+      setCategories(prev => [...prev, cat]);
+      setNewCatName('');
+      setShowCatModal(false);
+    } catch {
+      Alert.alert('오류', '카테고리 추가에 실패했어요');
+    }
+  };
+
+  const handleDeleteCategory = async (catId) => {
+    setCategories(prev => prev.filter(c => c.id !== catId));
+    try {
+      await deleteTeamCategory(catId);
+    } catch {
+      loadAll(); // 롤백
+    }
+  };
+
+  // ── 그라데이션 프로그레스바 ──────────────────────────
+  const renderProgressBar = () => {
+    const barColor = isBlack
+      ? '#222'
+      : paletteDrops.length > 0 ? paletteDrops[paletteDrops.length - 1].color : C.border;
+
+    return (
+      <View style={[detailStyles.progressWrap, { width: PALETTE_SIZE }]}>
+        <View style={detailStyles.progressTrack}>
+          <View style={[detailStyles.progressFill, {
+            width: `${progress}%`,
+            backgroundColor: barColor,
+          }]} />
+        </View>
+        <View style={detailStyles.progressMeta}>
+          {paletteDrops.slice(0, 10).map(d => (
+            <View key={d.id} style={[detailStyles.colorDot, { backgroundColor: d.color }]} />
+          ))}
+          {paletteDrops.length > 10 && (
+            <Text style={detailStyles.dotOverflow}>+{paletteDrops.length - 10}</Text>
+          )}
+          {totalCount > 0 && (
+            <Text style={detailStyles.countText}>{doneCount} / {totalCount}</Text>
+          )}
+        </View>
+      </View>
+    );
+  };
+
+  // ── 할일 아이템 ──────────────────────────────────────
+  const renderTodoItem = (todo) => {
+    const isDone = todo.done;
+
+    // 담당자 또는 작성자 색상
+    const targetMember = (() => {
+      if (todo.assignee_id) return members.find(m => m.user_id === todo.assignee_id);
+      return members.find(m => m.user_id === todo.author_id);
+    })();
+    const assigneeColor = targetMember
+      ? getMemberColor(targetMember.color_index).color
+      : myColor.color;
+
+    // 담당자 이름 (본인이 아닐 때만 표시)
+    const assigneeName = targetMember && targetMember.user_id !== userId
+      ? (targetMember.users?.name ?? '?')
+      : null;
+
+    // 삭제 권한: 본인 할일 또는 팀장
+    const canDelete = todo.author_id === userId || isOwner;
+
+    return (
+      <View
+        key={todo.id}
+        style={[
+          detailStyles.todoItem,
+          isDone && detailStyles.todoItemDone,
+          { borderLeftColor: isDone ? C.border : assigneeColor },
+        ]}
+      >
+        {/* 체크박스 */}
+        <TouchableOpacity
+          onPress={() => handleToggleTeamTodo(todo)}
+          style={[
+            detailStyles.checkbox,
+            isDone && { borderColor: assigneeColor, backgroundColor: assigneeColor },
+          ]}
+          activeOpacity={0.7}
+        >
+          {isDone && <Text style={detailStyles.checkmark}>✓</Text>}
+        </TouchableOpacity>
+
+        {/* 텍스트 */}
+        <Text
+          style={[detailStyles.todoText, isDone && detailStyles.todoTextDone]}
+          numberOfLines={2}
+        >
+          {todo.text}
+        </Text>
+
+        {/* 담당자 이니셜 뱃지 (본인이 아닐 때) */}
+        {assigneeName && (
+          <View style={[detailStyles.assigneeBadge, {
+            backgroundColor: assigneeColor + '25',
+            borderColor: assigneeColor,
+          }]}>
+            <Text style={[detailStyles.assigneeBadgeText, { color: assigneeColor }]}>
+              {assigneeName[0]}
+            </Text>
+          </View>
+        )}
+
+        {/* 삭제 버튼 */}
+        {canDelete && (
+          <TouchableOpacity
+            onPress={() => handleDeleteTeamTodo(todo.id)}
+            style={detailStyles.deleteBtn}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Text style={detailStyles.deleteBtnText}>✕</Text>
+          </TouchableOpacity>
+        )}
+      </View>
+    );
+  };
+
+  // ── 카테고리 섹션 ─────────────────────────────────────
+  const renderCategorySection = (cat) => {
+    const catTodos = todosByCat[cat.id] || [];
+    const catDone  = catTodos.filter(t => t.done).length;
+    const isAdding = addingCatId === cat.id;
+
+    return (
+      <View key={cat.id} style={detailStyles.catBlock}>
+        {/* 카테고리 헤더 */}
+        <View style={detailStyles.catHeader}>
+          <View style={[detailStyles.catPill, {
+            backgroundColor: cat.color + '15',
+            borderColor: cat.color + '28',
+          }]}>
+            <View style={[detailStyles.catDot, { backgroundColor: cat.color }]} />
+            <Text style={[detailStyles.catName, { color: cat.color }]}>{cat.name}</Text>
+          </View>
+          {catTodos.length > 0 && (
+            <Text style={detailStyles.catCount}>{catDone}/{catTodos.length}</Text>
+          )}
+          <View style={{ flex: 1 }} />
+          <TouchableOpacity
+            onPress={() => {
+              setAddingCatId(cat.id);
+              setNewTodoText('');
+              setSelectedAssignee(null);
+              setTimeout(() => inputRef.current?.focus(), 50);
+            }}
+            style={detailStyles.catAddBtn}
+          >
+            <Text style={detailStyles.catAddBtnText}>+</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* 할일 목록 */}
+        <View style={detailStyles.todoList}>
+          {catTodos.map(todo => renderTodoItem(todo))}
+        </View>
+
+        {/* 할일 추가 UI */}
+        {isAdding && (
+          <View style={detailStyles.addTodoWrap}>
+            {/* 담당자 선택 (멤버 칩) */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              style={detailStyles.assigneeRow}
+            >
+              {/* 본인 (기본) */}
+              <TouchableOpacity
+                onPress={() => setSelectedAssignee(null)}
+                style={[
+                  detailStyles.assigneeChip,
+                  !selectedAssignee && {
+                    backgroundColor: myColor.color + '22',
+                    borderColor: myColor.color,
+                  },
+                ]}
+              >
+                <View style={[detailStyles.assigneeChipDot, { backgroundColor: myColor.color }]} />
+                <Text style={[detailStyles.assigneeChipText, !selectedAssignee && { color: myColor.color }]}>
+                  나
+                </Text>
+              </TouchableOpacity>
+
+              {/* 다른 멤버들 */}
+              {members
+                .filter(m => m.user_id !== userId)
+                .map(m => {
+                  const mc = getMemberColor(m.color_index);
+                  const isSelected = selectedAssignee?.user_id === m.user_id;
                   return (
                     <TouchableOpacity
-                      key={u.id}
-                      style={[styles.searchResultRow, alreadyMember && { opacity: 0.4 }]}
-                      onPress={() => !alreadyMember && handleInviteUser(u)}
-                      disabled={alreadyMember}
+                      key={m.user_id}
+                      onPress={() => setSelectedAssignee(isSelected ? null : m)}
+                      style={[
+                        detailStyles.assigneeChip,
+                        isSelected && {
+                          backgroundColor: mc.color + '22',
+                          borderColor: mc.color,
+                        },
+                      ]}
                     >
-                      <Text style={styles.searchResultName}>{u.name}</Text>
-                      <Text style={styles.searchResultHandle}>{u.handle}</Text>
-                      {alreadyMember
-                        ? <Text style={styles.alreadyMemberText}>이미 팀원</Text>
-                        : <Text style={styles.inviteDirectText}>+ 초대</Text>
-                      }
+                      <View style={[detailStyles.assigneeChipDot, { backgroundColor: mc.color }]} />
+                      <Text style={[detailStyles.assigneeChipText, isSelected && { color: mc.color }]}>
+                        {m.users?.name ?? '?'}
+                      </Text>
                     </TouchableOpacity>
                   );
                 })}
+            </ScrollView>
+
+            {/* 텍스트 입력 */}
+            <View style={detailStyles.addTodoRow}>
+              <TextInput
+                ref={inputRef}
+                value={newTodoText}
+                onChangeText={setNewTodoText}
+                onSubmitEditing={() => handleAddTeamTodo(cat.id)}
+                onBlur={() => { if (!newTodoText.trim()) setAddingCatId(null); }}
+                placeholder="할 일을 입력하고 Enter"
+                placeholderTextColor={C.dim}
+                style={detailStyles.addTodoInput}
+                autoFocus
+                returnKeyType="done"
+              />
+              <TouchableOpacity
+                onPress={() => handleAddTeamTodo(cat.id)}
+                style={[detailStyles.addTodoSubmit, { backgroundColor: myColor.color }]}
+              >
+                <Text style={detailStyles.addTodoSubmitText}>↵</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+      </View>
+    );
+  };
+
+  // ── 로딩 ─────────────────────────────────────────────
+  if (loading) {
+    return (
+      <View style={styles.loadingWrap}>
+        <ActivityIndicator color={C.text} />
+      </View>
+    );
+  }
+
+  // ── 메인 렌더 ─────────────────────────────────────────
+  return (
+    <View style={[styles.root, { paddingTop: insets.top }]}>
+
+      {/* ══ 상단 고정 영역 ══ */}
+      <View style={detailStyles.topArea}>
+
+        {/* 헤더: 뒤로 + 팀 이름 + 캘린더/카테고리 + 메뉴 */}
+        <View style={detailStyles.headerRow}>
+          <TouchableOpacity onPress={onBack} style={detailStyles.backBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Text style={detailStyles.backBtnText}>‹</Text>
+          </TouchableOpacity>
+
+          <View style={detailStyles.headerTitle}>
+            <Text style={detailStyles.teamName} numberOfLines={1}>{team.name}</Text>
+            {team.description ? (
+              <Text style={detailStyles.teamDesc} numberOfLines={1}>{team.description}</Text>
+            ) : null}
+          </View>
+
+          <View style={detailStyles.headerBtns}>
+            <TouchableOpacity onPress={() => setShowCal(true)} style={detailStyles.headerPill}>
+              <Text style={detailStyles.headerPillText}>캘린더</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowCatModal(true)} style={detailStyles.headerPill}>
+              <Text style={detailStyles.headerPillText}>카테고리</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => setShowMenu(v => !v)} style={detailStyles.menuBtn}>
+              <Text style={detailStyles.menuBtnText}>⋯</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {/* 멤버 아바타 행 */}
+        <View style={detailStyles.memberRow}>
+          {members.map(m => {
+            const mc = getMemberColor(m.color_index);
+            const name = m.users?.name ?? '?';
+            return (
+              <View
+                key={m.user_id}
+                style={[detailStyles.memberAvatar, {
+                  backgroundColor: mc.color + '25',
+                  borderColor: mc.color,
+                }]}
+              >
+                <Text style={[detailStyles.memberAvatarText, { color: mc.color }]}>
+                  {name[0]}
+                </Text>
               </View>
-            )}
-            <Text style={styles.memberListTitle}>현재 멤버 ({detail?.team_members?.length ?? 0}명)</Text>
-            {detail?.team_members?.map(m => (
-              <View key={m.user_id} style={styles.memberListRow}>
-                <View style={[styles.memberAvatar, { backgroundColor: getMemberColor(m.color_index).color, width: 28, height: 28, borderRadius: 14 }]}>
-                  <Text style={styles.memberAvatarText}>{m.users?.name?.[0]?.toUpperCase() ?? '?'}</Text>
+            );
+          })}
+          <TouchableOpacity onPress={() => setShowInvite(true)} style={detailStyles.inviteBtn}>
+            <Text style={detailStyles.inviteBtnText}>+ 초대</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* 날짜 네비 */}
+        <View style={detailStyles.dateRow}>
+          <View style={detailStyles.dateNav}>
+            <Text style={detailStyles.dateNavLabel}>team</Text>
+            <View style={detailStyles.dateNavInner}>
+              <TouchableOpacity onPress={() => goDay(-1)} style={detailStyles.navBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Text style={detailStyles.navArrow}>◀</Text>
+              </TouchableOpacity>
+              <Text style={detailStyles.dateText} numberOfLines={1}>
+                {isToday
+                  ? '오늘'
+                  : selDateObj.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' })}
+              </Text>
+              <TouchableOpacity onPress={() => goDay(1)} style={detailStyles.navBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                <Text style={detailStyles.navArrow}>▶</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+
+        {/* 팔레트 캔버스 */}
+        <View style={detailStyles.paletteWrap}>
+          <PaletteCanvas
+            drops={paletteDrops}
+            totalCount={totalCount}
+            size={PALETTE_SIZE}
+            animDrop={animDrop}
+            onAnimDone={handleAnimDone}
+            style={{ borderRadius: R.lg }}
+          />
+          {renderProgressBar()}
+        </View>
+      </View>
+
+      {/* 구분선 */}
+      <View style={detailStyles.divider} />
+
+      {/* 참여 요청 배너 (방장에게만 표시) */}
+      {isOwner && joinRequests.length > 0 && (
+        <View style={detailStyles.requestBanner}>
+          {joinRequests.map(req => (
+            <View key={req.id} style={detailStyles.requestRow}>
+              <Text style={detailStyles.requestName} numberOfLines={1}>
+                {req.users?.name ?? '알 수 없음'}
+                <Text style={detailStyles.requestHandle}> @{req.users?.handle}</Text>
+                {'  참여 요청'}
+              </Text>
+              <View style={detailStyles.requestBtns}>
+                <TouchableOpacity
+                  onPress={() => handleAcceptRequest(req)}
+                  style={detailStyles.acceptBtn}
+                >
+                  <Text style={detailStyles.acceptBtnText}>수락</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  onPress={() => handleRejectRequest(req)}
+                  style={detailStyles.rejectBtn}
+                >
+                  <Text style={detailStyles.rejectBtnText}>거절</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {/* ══ 할일 목록 스크롤 ══ */}
+      <ScrollView
+        style={detailStyles.scroll}
+        contentContainerStyle={detailStyles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
+        {categories.length === 0 ? (
+          <View style={detailStyles.emptyWrap}>
+            <Text style={detailStyles.emptyTitle}>카테고리를 만들어 할 일을 분류해보세요</Text>
+            <TouchableOpacity onPress={() => setShowCatModal(true)} style={detailStyles.emptyBtn}>
+              <Text style={detailStyles.emptyBtnText}>+ 카테고리 추가</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          categories.map(cat => renderCategorySection(cat))
+        )}
+        <View style={{ height: 100 }} />
+      </ScrollView>
+
+      {/* 카테고리 관리 모달 */}
+      <Modal
+        visible={showCatModal}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowCatModal(false)}
+      >
+        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowCatModal(false)}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+            <TouchableOpacity activeOpacity={1}>
+              <View style={styles.modalSheet}>
+                <View style={styles.modalHandle} />
+                <View style={styles.modalTitleRow}>
+                  <Text style={styles.modalTitle}>카테고리 관리</Text>
+                  <TouchableOpacity onPress={() => setShowCatModal(false)} style={styles.modalCloseBtn}>
+                    <Text style={styles.modalCloseBtnText}>✕</Text>
+                  </TouchableOpacity>
                 </View>
-                <Text style={styles.memberListName}>{m.users?.name}</Text>
-                <Text style={styles.memberListHandle}>{m.users?.handle}</Text>
-                {m.user_id === detail?.created_by && (
-                  <View style={styles.ownerBadge}><Text style={styles.ownerBadgeText}>팀장</Text></View>
+
+                {/* 기존 카테고리 목록 */}
+                {categories.length > 0 && (
+                  <View style={detailStyles.modalCatList}>
+                    {categories.map(cat => (
+                      <View key={cat.id} style={detailStyles.modalCatRow}>
+                        <View style={[detailStyles.modalCatDot, { backgroundColor: cat.color }]} />
+                        <Text style={detailStyles.modalCatName}>{cat.name}</Text>
+                        <TouchableOpacity
+                          onPress={() => Alert.alert(
+                            '카테고리 삭제',
+                            `'${cat.name}'과 관련 할 일을 모두 삭제할까요?`,
+                            [
+                              { text: '취소', style: 'cancel' },
+                              { text: '삭제', style: 'destructive', onPress: () => handleDeleteCategory(cat.id) },
+                            ],
+                          )}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        >
+                          <Text style={detailStyles.modalCatDelText}>✕</Text>
+                        </TouchableOpacity>
+                      </View>
+                    ))}
+                  </View>
                 )}
-              </View>
-            ))}
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
 
-      {/* 카테고리 모달 */}
-      <Modal visible={catModalVisible} animationType="slide" transparent onRequestClose={() => setCatModalVisible(false)}>
-        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setCatModalVisible(false)}>
-          <TouchableOpacity activeOpacity={1} style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>팀 카테고리</Text>
-            <View style={styles.colorRow}>
-              {CAT_COLORS.map(c => (
-                <TouchableOpacity key={c} style={[styles.colorDot, { backgroundColor: c }, newCatColor === c && styles.colorDotSelected]} onPress={() => setNewCatColor(c)} />
-              ))}
-            </View>
-            <View style={styles.catInputRow}>
-              <TextInput style={styles.catInput} value={newCatName} onChangeText={setNewCatName} placeholder="카테고리 이름" placeholderTextColor={C.dim} onSubmitEditing={handleAddCategory} />
-              <TouchableOpacity style={styles.catAddBtn} onPress={handleAddCategory}>
-                <Text style={styles.catAddBtnText}>추가</Text>
-              </TouchableOpacity>
-            </View>
-            <FlatList
-              data={categories}
-              keyExtractor={item => item.id}
-              style={styles.catList}
-              renderItem={({ item }) => (
-                <View style={styles.catListRow}>
-                  <View style={[styles.catDot, { backgroundColor: item.color }]} />
-                  <Text style={styles.catListName}>{item.name}</Text>
+                {/* 색상 선택 */}
+                <View style={detailStyles.catColorRow}>
+                  {CAT_COLORS.map(color => (
+                    <TouchableOpacity
+                      key={color}
+                      onPress={() => setNewCatColor(color)}
+                      style={[
+                        detailStyles.catColorOption,
+                        { backgroundColor: color },
+                        newCatColor === color && detailStyles.catColorOptionActive,
+                      ]}
+                    />
+                  ))}
                 </View>
-              )}
-            />
-          </TouchableOpacity>
+
+                {/* 이름 입력 */}
+                <View style={detailStyles.modalInputRow}>
+                  <TextInput
+                    value={newCatName}
+                    onChangeText={setNewCatName}
+                    onSubmitEditing={handleAddCategory}
+                    placeholder="카테고리 이름"
+                    placeholderTextColor={C.dim}
+                    style={styles.modalInput}
+                    autoFocus
+                    returnKeyType="done"
+                  />
+                  <TouchableOpacity onPress={handleAddCategory} style={detailStyles.catAddModalBtn}>
+                    <Text style={detailStyles.catAddModalBtnText}>+</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </TouchableOpacity>
+          </KeyboardAvoidingView>
         </TouchableOpacity>
       </Modal>
 
-      {/* 메뉴 모달 */}
-      <Modal visible={menuVisible} animationType="fade" transparent onRequestClose={() => setMenuVisible(false)}>
-        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setMenuVisible(false)}>
-          <TouchableOpacity activeOpacity={1} style={styles.menuSheet}>
-            {isOwner ? (
-              <>
-                <TouchableOpacity style={styles.menuItem} onPress={() => { setMenuVisible(false); setEditModalVisible(true); }}>
-                  <Text style={styles.menuItemText}>팀 정보 수정</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.menuItem} onPress={handleDeleteTeam}>
-                  <Text style={[styles.menuItemText, { color: '#ff6b6b' }]}>팀 삭제</Text>
-                </TouchableOpacity>
-              </>
-            ) : (
-              <TouchableOpacity style={styles.menuItem} onPress={handleLeaveTeam}>
-                <Text style={[styles.menuItemText, { color: '#ff6b6b' }]}>팀 나가기</Text>
+      {/* ⋯ 드롭다운 메뉴 */}
+      {showMenu && (
+        <TouchableOpacity
+          style={StyleSheet.absoluteFill}
+          activeOpacity={1}
+          onPress={() => setShowMenu(false)}
+        >
+          <View style={detailStyles.menuDropdown}>
+            {/* 팀 코드 */}
+            <TouchableOpacity
+              onPress={() => {
+                setShowMenu(false);
+                const code = team.id.slice(0, 8).toUpperCase();
+                Alert.alert('팀 코드', `${code}\n멤버들에게 이 코드를 공유하세요.`);
+              }}
+              style={detailStyles.menuItem}
+            >
+              <Text style={detailStyles.menuItemText}>팀 코드 보기</Text>
+            </TouchableOpacity>
+            {isOwner && (
+              <TouchableOpacity
+                onPress={() => { setShowMenu(false); setShowEditTeam(true); }}
+                style={detailStyles.menuItem}
+              >
+                <Text style={detailStyles.menuItemText}>팀 정보 수정</Text>
               </TouchableOpacity>
             )}
-          </TouchableOpacity>
+            {!isOwner && (
+              <TouchableOpacity
+                onPress={() => {
+                  setShowMenu(false);
+                  Alert.alert('팀 나가기', '팀에서 나가면 다시 초대받아야 참여할 수 있어요. 나갈까요?', [
+                    { text: '취소', style: 'cancel' },
+                    { text: '나가기', style: 'destructive', onPress: async () => {
+                      try { await leaveTeam(team.id, userId); onBack(); }
+                      catch { Alert.alert('오류', '나가기에 실패했어요'); }
+                    }},
+                  ]);
+                }}
+                style={detailStyles.menuItem}
+              >
+                <Text style={[detailStyles.menuItemText, { color: '#ff9f43' }]}>팀 나가기</Text>
+              </TouchableOpacity>
+            )}
+            {isOwner && (
+              <TouchableOpacity
+                onPress={() => {
+                  setShowMenu(false);
+                  Alert.alert('팀 삭제', '팀을 삭제하면 모든 데이터가 사라져요. 정말 삭제할까요?', [
+                    { text: '취소', style: 'cancel' },
+                    { text: '삭제', style: 'destructive', onPress: async () => {
+                      try { await deleteTeam(team.id); onBack(); }
+                      catch { Alert.alert('오류', '삭제에 실패했어요'); }
+                    }},
+                  ]);
+                }}
+                style={[detailStyles.menuItem, { borderBottomWidth: 0 }]}
+              >
+                <Text style={[detailStyles.menuItemText, { color: '#ff6b6b' }]}>팀 삭제</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </TouchableOpacity>
-      </Modal>
+      )}
 
       {/* 팀 정보 수정 모달 */}
-      <Modal visible={editModalVisible} animationType="slide" transparent onRequestClose={() => setEditModalVisible(false)}>
-        <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setEditModalVisible(false)}>
-          <TouchableOpacity activeOpacity={1} style={styles.modalSheet}>
-            <View style={styles.modalHandle} />
-            <Text style={styles.modalTitle}>팀 정보 수정</Text>
-            <View style={styles.fieldGroup}>
-              <Text style={styles.label}>팀 이름</Text>
-              <TextInput style={styles.input} value={editName} onChangeText={setEditName} placeholderTextColor={C.dim} />
-            </View>
-            <View style={styles.fieldGroup}>
-              <Text style={styles.label}>설명</Text>
-              <TextInput style={styles.input} value={editDesc} onChangeText={setEditDesc} placeholderTextColor={C.dim} />
-            </View>
-            <TouchableOpacity style={styles.submitBtn} onPress={handleEditTeam}>
-              <Text style={styles.submitBtnText}>저장</Text>
-            </TouchableOpacity>
+      {showEditTeam && (
+        <Modal visible transparent animationType="slide" onRequestClose={() => setShowEditTeam(false)}>
+          <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setShowEditTeam(false)}>
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+              <TouchableOpacity activeOpacity={1}>
+                <View style={styles.modalSheet}>
+                  <View style={styles.modalHandle} />
+                  <View style={styles.modalTitleRow}>
+                    <Text style={styles.modalTitle}>팀 정보 수정</Text>
+                    <TouchableOpacity onPress={() => setShowEditTeam(false)} style={styles.modalCloseBtn}>
+                      <Text style={styles.modalCloseBtnText}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <TextInput
+                    style={styles.modalInput}
+                    value={editName}
+                    onChangeText={setEditName}
+                    placeholder="팀 이름"
+                    placeholderTextColor={C.dim}
+                    autoFocus
+                  />
+                  <TextInput
+                    style={[styles.modalInput, { marginTop: 8 }]}
+                    value={editDesc}
+                    onChangeText={setEditDesc}
+                    placeholder="설명 (선택)"
+                    placeholderTextColor={C.dim}
+                  />
+                  <TouchableOpacity
+                    style={[styles.submitBtn, !editName.trim() && { opacity: 0.4 }]}
+                    disabled={!editName.trim()}
+                    onPress={async () => {
+                      try {
+                        await updateTeam(team.id, editName.trim(), editDesc.trim());
+                        setShowEditTeam(false);
+                        loadAll();
+                      } catch {
+                        Alert.alert('오류', '수정에 실패했어요');
+                      }
+                    }}
+                  >
+                    <Text style={styles.submitBtnText}>저장</Text>
+                  </TouchableOpacity>
+                </View>
+              </TouchableOpacity>
+            </KeyboardAvoidingView>
           </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
+        </Modal>
+      )}
+
+      {/* 멤버 초대 모달 */}
+      {showInvite && (
+        <Modal visible transparent animationType="slide" onRequestClose={() => { setShowInvite(false); setInviteQuery(''); setInviteResults([]); }}>
+          <TouchableOpacity
+            style={styles.modalOverlay}
+            activeOpacity={1}
+            onPress={() => { setShowInvite(false); setInviteQuery(''); setInviteResults([]); }}
+          >
+            <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+              <TouchableOpacity activeOpacity={1}>
+                <View style={styles.modalSheet}>
+                  <View style={styles.modalHandle} />
+                  <View style={styles.modalTitleRow}>
+                    <Text style={styles.modalTitle}>멤버 초대</Text>
+                    <TouchableOpacity onPress={() => { setShowInvite(false); setInviteQuery(''); setInviteResults([]); }} style={styles.modalCloseBtn}>
+                      <Text style={styles.modalCloseBtnText}>✕</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <Text style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>이름 또는 @아이디로 검색해요</Text>
+                  <TextInput
+                    style={styles.modalInput}
+                    value={inviteQuery}
+                    onChangeText={handleInviteSearch}
+                    placeholder="이름 또는 @아이디"
+                    placeholderTextColor={C.dim}
+                    autoCapitalize="none"
+                    autoFocus
+                  />
+                  {inviteResults.length > 0 && (
+                    <View style={{ marginTop: 8, borderRadius: R.md, overflow: 'hidden', borderWidth: 1, borderColor: C.border }}>
+                      {inviteResults.map(u => {
+                        const alreadyMember = detail?.team_members?.some(m => m.user_id === u.id);
+                        return (
+                          <TouchableOpacity
+                            key={u.id}
+                            style={[detailStyles.inviteResultRow, alreadyMember && { opacity: 0.4 }]}
+                            onPress={() => !alreadyMember && handleInviteUser(u)}
+                            disabled={alreadyMember || inviting}
+                          >
+                            <View style={{ flex: 1 }}>
+                              <Text style={{ fontSize: 14, color: C.text }}>{u.name}</Text>
+                              <Text style={{ fontSize: 11, color: C.muted }}>@{u.handle}</Text>
+                            </View>
+                            {alreadyMember
+                              ? <Text style={{ fontSize: 11, color: C.dim }}>이미 팀원</Text>
+                              : <Text style={{ fontSize: 13, color: C.text }}>+ 초대</Text>
+                            }
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  )}
+                  <Text style={{ fontSize: 12, color: C.muted, marginTop: 16, marginBottom: 8 }}>
+                    현재 멤버 ({detail?.team_members?.length ?? 0}명)
+                  </Text>
+                  {detail?.team_members?.map(m => (
+                    <View key={m.user_id} style={detailStyles.memberListRow}>
+                      <View style={[detailStyles.memberAvatar, { backgroundColor: getMemberColor(m.color_index).color }]}>
+                        <Text style={detailStyles.memberAvatarText}>{m.users?.name?.[0]?.toUpperCase() ?? '?'}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 13, color: C.text }}>{m.users?.name}</Text>
+                        <Text style={{ fontSize: 11, color: C.muted }}>@{m.users?.handle}</Text>
+                      </View>
+                      {m.user_id === detail?.created_by && (
+                        <View style={detailStyles.ownerBadge}>
+                          <Text style={detailStyles.ownerBadgeText}>팀장</Text>
+                        </View>
+                      )}
+                    </View>
+                  ))}
+                </View>
+              </TouchableOpacity>
+            </KeyboardAvoidingView>
+          </TouchableOpacity>
+        </Modal>
+      )}
+
+      {/* 캘린더 시트 (absoluteFill) */}
+      {renderCalendarView()}
+
+      {/* BLACK 오버레이 + FlyingOrb */}
+      {renderBlackModal()}
     </View>
   );
 }
 
+// ══════════════════════════════════════════════════════
+// 모달 컴포넌트 — CreateTeamModal
+// ══════════════════════════════════════════════════════
+
+function CreateTeamModal({ onClose, onCreate }) {
+  const [name, setName] = useState('');
+  const [desc, setDesc] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async () => {
+    if (!name.trim()) return;
+    setLoading(true);
+    try {
+      await onCreate({ name: name.trim(), desc: desc.trim() });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <Modal visible transparent animationType="slide" onRequestClose={onClose}>
+      <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={onClose}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <TouchableOpacity activeOpacity={1}>
+            <View style={styles.modalSheet}>
+              <View style={styles.modalHandle} />
+              <View style={styles.modalTitleRow}>
+                <Text style={styles.modalTitle}>팀 만들기</Text>
+                <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn}>
+                  <Text style={styles.modalCloseBtnText}>✕</Text>
+                </TouchableOpacity>
+              </View>
+              <TextInput
+                style={styles.modalInput}
+                value={name}
+                onChangeText={setName}
+                placeholder="팀 이름 *"
+                placeholderTextColor={C.dim}
+                autoFocus
+                returnKeyType="next"
+              />
+              <TextInput
+                style={[styles.modalInput, { marginTop: 8 }]}
+                value={desc}
+                onChangeText={setDesc}
+                placeholder="설명 (선택)"
+                placeholderTextColor={C.dim}
+                returnKeyType="done"
+                onSubmitEditing={handleSubmit}
+              />
+              <TouchableOpacity
+                style={[styles.submitBtn, (!name.trim() || loading) && { opacity: 0.4 }]}
+                onPress={handleSubmit}
+                disabled={!name.trim() || loading}
+              >
+                {loading
+                  ? <ActivityIndicator color={C.bg} />
+                  : <Text style={styles.submitBtnText}>만들기</Text>}
+              </TouchableOpacity>
+            </View>
+          </TouchableOpacity>
+        </KeyboardAvoidingView>
+      </TouchableOpacity>
+    </Modal>
+  );
+}
+
+// ══════════════════════════════════════════════════════
+// StyleSheet
+// ══════════════════════════════════════════════════════
+
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: C.bg, paddingTop: 56 },
-  loadingContainer: { flex: 1, backgroundColor: C.bg, justifyContent: 'center', alignItems: 'center' },
+  root: {
+    flex: 1,
+    backgroundColor: C.bg,
+  },
+  loadingWrap: {
+    flex: 1,
+    backgroundColor: C.bg,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
-  // 목록 헤더
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, marginBottom: 14 },
-  headerLabel: { color: C.dim, fontSize: 9, letterSpacing: 3, marginBottom: 2 },
-  headerTitle: { color: C.text, fontSize: 24, fontWeight: '800' },
-  createBtn: { backgroundColor: C.card, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 8, borderWidth: 1, borderColor: C.border2 },
-  createBtnText: { color: C.text, fontSize: 13, fontWeight: '600' },
+  // ── 팀 목록 헤더 ──
+  listHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    paddingHorizontal: 18,
+    paddingTop: 24,
+    paddingBottom: 0,
+  },
+  listHeaderLabel: {
+    fontSize: 10,
+    color: C.dim,
+    letterSpacing: 3,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  listHeaderTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: C.text,
+    letterSpacing: -0.5,
+  },
+  headerBtnGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  joinBtn: {
+    height: 32,
+    paddingHorizontal: 14,
+    borderRadius: R.full,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  joinBtnText: {
+    fontSize: 12,
+    color: C.text,
+  },
+  createBtn: {
+    height: 32,
+    paddingHorizontal: 14,
+    borderRadius: R.full,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  createBtnText: {
+    fontSize: 12,
+    color: C.muted,
+  },
 
-  // 검색
-  searchWrap: { paddingHorizontal: 20, marginBottom: 14 },
+  // ── 코드 참여 모달 ──
+  joinModalDesc: {
+    fontSize: 12,
+    color: C.muted,
+    lineHeight: 18,
+    marginBottom: 14,
+  },
+  joinCodeInput: {
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border2,
+    borderRadius: R.md,
+    paddingVertical: 13,
+    paddingHorizontal: 16,
+    color: C.text,
+    fontSize: 18,
+    fontWeight: '700',
+    letterSpacing: 4,
+    textAlign: 'center',
+    marginBottom: 14,
+  },
+  modalBackBtn: {
+    width: 32,
+    alignItems: 'flex-start',
+    justifyContent: 'center',
+  },
+  modalBackBtnText: {
+    fontSize: 22,
+    color: C.muted,
+    lineHeight: 26,
+  },
+  joinPreviewCard: {
+    backgroundColor: C.card,
+    borderRadius: R.md,
+    borderWidth: 1,
+    borderColor: C.border2,
+    padding: 16,
+    marginBottom: 14,
+    gap: 4,
+  },
+  joinPreviewName: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: C.text,
+    letterSpacing: -0.3,
+  },
+  joinPreviewDesc: {
+    fontSize: 13,
+    color: C.muted,
+  },
+  joinPreviewCode: {
+    fontSize: 11,
+    color: C.dim,
+    marginTop: 4,
+    letterSpacing: 1,
+  },
+  joinPreviewNote: {
+    fontSize: 12,
+    color: C.muted,
+    textAlign: 'center',
+    marginBottom: 14,
+  },
+  joinAlreadyWrap: {
+    paddingVertical: 16,
+    alignItems: 'center',
+  },
+  joinAlreadyText: {
+    fontSize: 14,
+    color: C.muted,
+  },
+
+  // ── 검색 ──
+  searchWrap: {
+    paddingHorizontal: 18,
+    paddingTop: 14,
+  },
   searchInput: {
-    backgroundColor: C.surface, borderRadius: 12,
-    paddingHorizontal: 16, paddingVertical: 11,
-    color: C.text, fontSize: 13,
-    borderWidth: 1, borderColor: C.border,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: R.md,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    color: C.text,
+    fontSize: 13,
   },
 
-  scroll: { flex: 1, paddingHorizontal: 20 },
-
-  // 빈 화면
-  emptyContainer: { alignItems: 'center', paddingTop: 60, gap: 12 },
-  emptyEmoji: { fontSize: 48 },
-  emptyTitle: { color: C.text, fontSize: 18, fontWeight: '700' },
-  emptyDesc: { color: C.dim, fontSize: 14, textAlign: 'center', lineHeight: 22 },
-  emptyBtn: { marginTop: 8, backgroundColor: C.card, borderRadius: 12, paddingHorizontal: 20, paddingVertical: 12, borderWidth: 1, borderColor: C.border2 },
-  emptyBtnText: { color: C.muted, fontSize: 14 },
-
-  // 팀 카드 (개선)
+  // ── 스크롤 + 팀 카드 ──
+  scroll: {
+    flex: 1,
+    paddingHorizontal: 18,
+    paddingTop: 14,
+  },
+  emptyWrap: {
+    alignItems: 'center',
+    paddingVertical: 48,
+  },
+  emptyIcon: {
+    fontSize: 28,
+    marginBottom: 12,
+    color: C.dim,
+  },
+  emptyTitle: {
+    fontSize: 13,
+    color: C.dim,
+    marginBottom: 6,
+  },
+  emptyDesc: {
+    fontSize: 11,
+    color: C.dim,
+    marginBottom: 16,
+  },
+  emptyBtn: {
+    height: 36,
+    paddingHorizontal: 18,
+    borderRadius: R.full,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyBtnText: {
+    fontSize: 13,
+    color: C.muted,
+  },
   teamCard: {
-    backgroundColor: C.surface, borderRadius: 16, padding: 14,
-    marginBottom: 12, borderWidth: 1, borderColor: C.border,
+    padding: 14,
+    marginBottom: 10,
+    backgroundColor: C.surface,
+    borderRadius: R.lg,
+    borderWidth: 1,
+    borderColor: C.border,
   },
-  teamCardInner: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  teamCardCanvas: { borderRadius: 10, overflow: 'hidden', flexShrink: 0 },
-  teamCardContent: { flex: 1, gap: 5 },
-  teamCardTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  teamCardName: { color: C.text, fontSize: 15, fontWeight: '700' },
-  teamCardArrow: { color: C.dim, fontSize: 15 },
-  teamCardDesc: { color: C.muted, fontSize: 12 },
-  teamCardBottom: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 2 },
-  memberDotsRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  memberColorDot: { width: 8, height: 8, borderRadius: 4 },
-  memberMoreText: { color: C.dim, fontSize: 9, marginLeft: 2 },
-  miniProgressWrap: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  miniProgressTrack: { width: 48, height: 3, borderRadius: 2, backgroundColor: C.border, overflow: 'hidden' },
-  miniProgressFill: { height: '100%', borderRadius: 2 },
-  miniProgressText: { color: C.dim, fontSize: 9 },
+  teamCardRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  teamCardCanvas: {
+    width: 44,
+    height: 44,
+    borderRadius: R.sm,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: C.border,
+    flexShrink: 0,
+  },
+  teamCardInfo: {
+    flex: 1,
+    minWidth: 0,
+  },
+  teamCardName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.text,
+  },
+  teamCardDesc: {
+    fontSize: 11,
+    color: C.muted,
+    marginTop: 2,
+  },
+  teamCardMemberCount: {
+    fontSize: 11,
+    color: C.dim,
+    flexShrink: 0,
+  },
+  memberDotsRow: {
+    flexDirection: 'row',
+    gap: 5,
+    marginBottom: 8,
+  },
+  memberDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  memberMore: {
+    fontSize: 9,
+    color: C.dim,
+    alignSelf: 'center',
+  },
+  miniProgressWrap: {
+    gap: 4,
+  },
+  miniProgressTrack: {
+    height: 3,
+    backgroundColor: C.card,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  miniProgressFill: {
+    height: '100%',
+    backgroundColor: C.text,
+    borderRadius: 3,
+  },
+  miniProgressText: {
+    fontSize: 10,
+    color: C.dim,
+  },
 
-  // 팀 상세
-  detailHeader: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, marginBottom: 12, gap: 12 },
-  backBtn: { padding: 4 },
-  backBtnText: { color: C.text, fontSize: 22 },
-  detailHeaderCenter: { flex: 1 },
-  detailTeamName: { color: C.text, fontSize: 18, fontWeight: '800' },
-  detailTeamDesc: { color: C.muted, fontSize: 12, marginTop: 2 },
-  menuBtn: { padding: 8 },
-  menuBtnText: { color: C.muted, fontSize: 18, letterSpacing: 2 },
-  membersRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, gap: 8, marginBottom: 16, flexWrap: 'wrap' },
-  memberAvatar: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center' },
-  memberAvatarText: { color: '#fff', fontSize: 14, fontWeight: '700' },
-  inviteBtn: { backgroundColor: C.card, borderRadius: 18, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: C.border2 },
-  inviteBtnText: { color: C.muted, fontSize: 12 },
-  dateNav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 24, marginBottom: 16 },
-  dateBtn: { padding: 8 },
-  dateBtnText: { color: C.muted, fontSize: 16 },
-  dateLabel: { color: C.text, fontSize: 18, fontWeight: '700', minWidth: 120, textAlign: 'center' },
-  progressBar: { height: 4, backgroundColor: C.surface, borderRadius: 2, overflow: 'hidden' },
-  progressFill: { height: '100%', borderRadius: 2 },
-  progressText: { color: C.dim, fontSize: 12, textAlign: 'right' },
-  listHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, marginBottom: 8 },
-  listTitle: { color: C.text, fontSize: 16, fontWeight: '700' },
-  catBtn: { backgroundColor: C.card, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: C.border2 },
-  catBtnText: { color: C.muted, fontSize: 13 },
-  catSection: { marginBottom: 20 },
-  catHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
-  catDot: { width: 10, height: 10, borderRadius: 5 },
-  catName: { color: C.muted, fontSize: 13, fontWeight: '600', flex: 1 },
-  addTodoBtn: { width: 28, height: 28, borderRadius: 8, backgroundColor: C.card, justifyContent: 'center', alignItems: 'center' },
-  addTodoBtnText: { color: C.dim, fontSize: 18, lineHeight: 22 },
-  todoInputArea: { gap: 4, marginBottom: 6 },
-  todoInputRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  todoInput: { flex: 1, backgroundColor: C.card, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, color: C.text, fontSize: 14, borderWidth: 1, borderColor: C.border2 },
-  todoInputDone: { padding: 8 },
-  todoInputDoneText: { color: C.text, fontSize: 18 },
-  todoInputCancel: { padding: 8 },
-  todoInputCancelText: { color: C.dim, fontSize: 14 },
-  assigneeRow: { paddingHorizontal: 4, paddingVertical: 6 },
-  assigneeSelected: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  assigneeDot: { width: 10, height: 10, borderRadius: 5 },
-  assigneeSelectedText: { color: C.text, fontSize: 13, flex: 1 },
-  assigneeClear: { color: C.dim, fontSize: 13 },
-  assigneePlaceholder: { color: '#444', fontSize: 13 },
-  todoRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 6 },
-  checkbox: { width: 22, height: 22, borderRadius: 11, borderWidth: 2, borderColor: '#333', justifyContent: 'center', alignItems: 'center' },
-  checkmark: { color: '#fff', fontSize: 12, fontWeight: '700' },
-  todoText: { flex: 1, color: C.text, fontSize: 14 },
-  todoTextDone: { color: C.dim, textDecorationLine: 'line-through' },
-  deleteBtn: { padding: 4 },
-  deleteBtnText: { color: '#333', fontSize: 13 },
-  catEmptyText: { color: '#333', fontSize: 13, paddingLeft: 18, paddingBottom: 4 },
-  authorBadge: { width: 22, height: 22, borderRadius: 11, justifyContent: 'center', alignItems: 'center' },
-  authorBadgeText: { color: '#fff', fontSize: 10, fontWeight: '700' },
+  // ── 모달 공통 ──
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'flex-end',
+  },
+  modalSheet: {
+    backgroundColor: C.surface,
+    borderTopLeftRadius: R.lg,
+    borderTopRightRadius: R.lg,
+    padding: 20,
+    paddingBottom: 36,
+  },
+  modalHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: C.border2,
+    alignSelf: 'center',
+    marginBottom: 16,
+  },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: C.text,
+  },
+  modalCloseBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: C.card,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalCloseBtnText: {
+    fontSize: 13,
+    color: C.muted,
+  },
+  modalInput: {
+    backgroundColor: C.card,
+    borderWidth: 1,
+    borderColor: C.border2,
+    borderRadius: R.md,
+    paddingVertical: 11,
+    paddingHorizontal: 14,
+    color: C.text,
+    fontSize: 13,
+  },
+  submitBtn: {
+    marginTop: 16,
+    height: 46,
+    borderRadius: R.md,
+    backgroundColor: C.text,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  submitBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.bg,
+  },
+});
 
-  // BLACK
-  blackOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.97)', justifyContent: 'center', alignItems: 'center', zIndex: 300 },
-  blackContent: { alignItems: 'center' },
-  blackOrb: { width: 80, height: 80, borderRadius: 40, marginBottom: 28, shadowColor: '#fff', shadowRadius: 40, shadowOffset: { width: 0, height: 0 }, elevation: 10 },
-  blackTitle: { fontSize: 28, letterSpacing: 8, color: '#fff', fontWeight: '200' },
-  blackSub: { fontSize: 12, color: C.dim, marginTop: 14, letterSpacing: 2 },
+// TeamDetailScreen 전용 스타일
+const detailStyles = StyleSheet.create({
 
-  // 캘린더
-  calOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.65)', zIndex: 150 },
-  calSheet: { position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: C.surface, borderBottomLeftRadius: 28, borderBottomRightRadius: 28, padding: 20, paddingBottom: 28 },
-  calHeader2: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 },
-  calNavBtn: { width: 34, height: 34, borderRadius: 17, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, justifyContent: 'center', alignItems: 'center' },
-  calNavTxt: { color: C.muted, fontSize: 18 },
-  calTitle: { fontSize: 15, fontWeight: '700', letterSpacing: -0.5, color: C.text },
-  calDowRow: { flexDirection: 'row', marginBottom: 6 },
-  calDow: { flex: 1, textAlign: 'center', fontSize: 10, color: C.dim },
-  calGrid: { flexDirection: 'row', flexWrap: 'wrap' },
-  calCell: { width: `${100/7}%`, aspectRatio: 0.9, alignItems: 'center', justifyContent: 'center', paddingVertical: 3, paddingHorizontal: 1 },
-  calCellSel: { backgroundColor: '#222', borderRadius: 8 },
-  calDayCircle: { width: 28, height: 28, borderRadius: 14, justifyContent: 'center', alignItems: 'center' },
-  calDayToday: { backgroundColor: '#1a1a1a', borderWidth: 1, borderColor: C.border2 },
-  calTodayDot: { width: 4, height: 4, borderRadius: 2, backgroundColor: C.dim },
-  calDayNum: { fontSize: 9, marginTop: 2 },
-  ripple: { position: 'absolute', top: -4, left: -4, right: -4, bottom: -4, borderRadius: 18, borderWidth: 1.5, borderColor: 'rgba(255,255,255,0.6)' },
+  // ── 상단 고정 영역 ──
+  topArea: {
+    flexShrink: 0,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 12,
+  },
+  backBtn: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  backBtnText: {
+    fontSize: 22,
+    color: C.muted,
+    lineHeight: 26,
+  },
+  headerTitle: {
+    flex: 1,
+    minWidth: 0,
+  },
+  teamName: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: C.text,
+    letterSpacing: -0.3,
+  },
+  teamDesc: {
+    fontSize: 11,
+    color: C.muted,
+    marginTop: 1,
+  },
+  headerBtns: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  headerPill: {
+    height: 28,
+    paddingHorizontal: 10,
+    borderRadius: R.full,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  headerPillText: {
+    fontSize: 11,
+    color: C.muted,
+  },
+  menuBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  menuBtnText: {
+    fontSize: 14,
+    color: C.muted,
+    letterSpacing: 1,
+  },
 
-  // 모달 공통
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', justifyContent: 'flex-end' },
-  modalSheet: { backgroundColor: C.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 24, maxHeight: '80%' },
-  modalHandle: { width: 34, height: 4, borderRadius: 2, backgroundColor: '#252525', alignSelf: 'center', marginBottom: 18 },
-  modalTitle: { color: C.text, fontSize: 18, fontWeight: '700', marginBottom: 8 },
-  modalDesc: { color: C.muted, fontSize: 13, marginBottom: 12 },
-  fieldGroup: { gap: 6, marginBottom: 14 },
-  label: { fontSize: 13, color: C.muted, marginLeft: 4 },
-  input: { backgroundColor: C.card, borderRadius: 12, paddingHorizontal: 16, paddingVertical: 14, color: C.text, fontSize: 15, borderWidth: 1, borderColor: C.border2 },
-  submitBtn: { backgroundColor: C.text, borderRadius: 12, paddingVertical: 15, alignItems: 'center', marginTop: 8 },
-  submitBtnDisabled: { opacity: 0.5 },
-  submitBtnText: { color: '#0a0a0a', fontSize: 15, fontWeight: '700' },
-  colorRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
-  colorDot: { width: 28, height: 28, borderRadius: 14 },
-  colorDotSelected: { borderWidth: 3, borderColor: C.text },
-  catInputRow: { flexDirection: 'row', gap: 10, marginBottom: 16 },
-  catInput: { flex: 1, backgroundColor: C.card, borderRadius: 10, paddingHorizontal: 14, paddingVertical: 14, color: C.text, fontSize: 14, borderWidth: 1, borderColor: C.border2 },
-  catAddBtn: { backgroundColor: C.text, borderRadius: 10, paddingHorizontal: 16, justifyContent: 'center' },
-  catAddBtnText: { color: '#0a0a0a', fontWeight: '700', fontSize: 14 },
-  catList: { maxHeight: 200 },
-  catListRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },
-  catListName: { flex: 1, color: C.text, fontSize: 14 },
-  memberListTitle: { color: C.muted, fontSize: 13, marginBottom: 8, marginTop: 8 },
-  memberListRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
-  memberListName: { color: C.text, fontSize: 14, flex: 1 },
-  memberListHandle: { color: C.dim, fontSize: 12 },
-  ownerBadge: { backgroundColor: '#2a2a2a', borderRadius: 6, paddingHorizontal: 8, paddingVertical: 3 },
-  ownerBadgeText: { color: C.muted, fontSize: 11 },
-  searchResultBox: { backgroundColor: C.card, borderRadius: 10, marginBottom: 12, overflow: 'hidden' },
-  searchResultRow: { flexDirection: 'row', alignItems: 'center', padding: 12, borderBottomWidth: 1, borderBottomColor: C.border2 },
-  searchResultName: { color: C.text, fontSize: 14, flex: 1 },
-  searchResultHandle: { color: C.dim, fontSize: 12, marginRight: 8 },
-  alreadyMemberText: { color: '#444', fontSize: 12 },
-  inviteDirectText: { color: '#6c8fff', fontSize: 12, fontWeight: '600' },
-  menuSheet: { backgroundColor: C.surface, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: 24 },
-  menuItem: { paddingVertical: 16, borderBottomWidth: 1, borderBottomColor: C.border },
-  menuItemText: { color: C.text, fontSize: 16 },
+  // ── 멤버 아바타 ──
+  memberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginBottom: 12,
+  },
+  memberAvatar: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  memberAvatarText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  inviteResultRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  memberListRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 7,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  ownerBadge: {
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: R.full,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border2,
+  },
+  ownerBadgeText: {
+    fontSize: 10,
+    color: C.muted,
+  },
+  inviteBtn: {
+    height: 26,
+    paddingHorizontal: 10,
+    borderRadius: R.full,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inviteBtnText: {
+    fontSize: 11,
+    color: C.muted,
+  },
+
+  // ── 날짜 네비 ──
+  dateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  dateNav: {
+    alignItems: 'center',
+  },
+  dateNavLabel: {
+    fontSize: 9,
+    color: C.dim,
+    letterSpacing: 3,
+    textTransform: 'uppercase',
+    marginBottom: 2,
+  },
+  dateNavInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  navBtn: {
+    width: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  navArrow: {
+    fontSize: 9,
+    color: C.muted,
+    opacity: 0.55,
+  },
+  dateText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: C.text,
+    letterSpacing: -0.3,
+    width: 120,
+    textAlign: 'center',
+  },
+
+  // ── 팔레트 ──
+  paletteWrap: {
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  progressWrap: {
+    marginTop: 8,
+  },
+  progressTrack: {
+    height: 3,
+    backgroundColor: C.surface,
+    borderRadius: 3,
+    overflow: 'hidden',
+    marginBottom: 5,
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  progressMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    minHeight: 12,
+  },
+  colorDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+  },
+  dotOverflow: {
+    fontSize: 9,
+    color: C.dim,
+  },
+  countText: {
+    fontSize: 10,
+    color: C.dim,
+    marginLeft: 'auto',
+  },
+
+  // ── 구분선 ──
+  divider: {
+    height: 1,
+    backgroundColor: C.border,
+    marginHorizontal: 18,
+    marginTop: 10,
+  },
+
+  // ── 참여 요청 배너 ──
+  requestBanner: {
+    marginHorizontal: 18,
+    marginTop: 8,
+    borderRadius: R.md,
+    borderWidth: 1,
+    borderColor: '#ffd166' + '55',
+    backgroundColor: '#ffd166' + '0d',
+    overflow: 'hidden',
+  },
+  requestRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 9,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#ffd166' + '22',
+    gap: 8,
+  },
+  requestName: {
+    flex: 1,
+    fontSize: 12,
+    color: C.text,
+  },
+  requestHandle: {
+    color: C.muted,
+  },
+  requestBtns: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  acceptBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: R.full,
+    backgroundColor: '#ffd166' + '33',
+    borderWidth: 1,
+    borderColor: '#ffd166' + '88',
+  },
+  acceptBtnText: {
+    fontSize: 11,
+    color: '#ffd166',
+    fontWeight: '600',
+  },
+  rejectBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: R.full,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border2,
+  },
+  rejectBtnText: {
+    fontSize: 11,
+    color: C.muted,
+  },
+
+  // ── 스크롤 / 할일 목록 ──
+  scroll: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingHorizontal: 18,
+    paddingTop: 10,
+  },
+  emptyWrap: {
+    alignItems: 'center',
+    paddingVertical: 28,
+  },
+  emptyTitle: {
+    fontSize: 12,
+    color: C.dim,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  emptyBtn: {
+    paddingVertical: 9,
+    paddingHorizontal: 20,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    borderRadius: R.full,
+  },
+  emptyBtnText: {
+    fontSize: 12,
+    color: C.muted,
+  },
+
+  // ── 카테고리 블록 ──
+  catBlock: {
+    marginBottom: 20,
+  },
+  catHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 8,
+  },
+  catPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 3,
+    paddingHorizontal: 10,
+    borderRadius: R.full,
+    borderWidth: 1,
+  },
+  catDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  catName: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  catCount: {
+    fontSize: 10,
+    color: C.dim,
+  },
+  catAddBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  catAddBtnText: {
+    fontSize: 15,
+    color: C.muted,
+    lineHeight: 18,
+  },
+
+  // ── 할일 아이템 ──
+  todoList: {
+    gap: 5,
+  },
+  todoItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    backgroundColor: C.card,
+    borderRadius: R.md,
+    borderWidth: 1,
+    borderColor: C.border2,
+    borderLeftWidth: 3,
+  },
+  todoItemDone: {
+    backgroundColor: 'transparent',
+    borderColor: C.border,
+    opacity: 0.45,
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    flexShrink: 0,
+    borderWidth: 2,
+    borderColor: C.border2,
+    backgroundColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  checkmark: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: '#080808',
+  },
+  todoText: {
+    flex: 1,
+    fontSize: 13,
+    color: C.text,
+  },
+  todoTextDone: {
+    color: C.muted,
+    textDecorationLine: 'line-through',
+  },
+  assigneeBadge: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  assigneeBadgeText: {
+    fontSize: 9,
+    fontWeight: '700',
+  },
+  deleteBtn: {
+    paddingHorizontal: 4,
+    flexShrink: 0,
+  },
+  deleteBtnText: {
+    fontSize: 13,
+    color: C.dim,
+  },
+
+  // ── 할일 추가 UI ──
+  addTodoWrap: {
+    marginTop: 7,
+    gap: 6,
+  },
+  assigneeRow: {
+    flexDirection: 'row',
+    marginBottom: 2,
+  },
+  assigneeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderRadius: R.full,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    marginRight: 6,
+  },
+  assigneeChipDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 3.5,
+  },
+  assigneeChipText: {
+    fontSize: 11,
+    color: C.muted,
+  },
+  addTodoRow: {
+    flexDirection: 'row',
+    gap: 7,
+  },
+  addTodoInput: {
+    flex: 1,
+    backgroundColor: C.card,
+    borderWidth: 1,
+    borderColor: C.border2,
+    borderRadius: R.md,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    color: C.text,
+    fontSize: 13,
+  },
+  addTodoSubmit: {
+    width: 40,
+    height: 40,
+    borderRadius: R.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  addTodoSubmitText: {
+    fontSize: 17,
+    color: '#080808',
+    fontWeight: '700',
+  },
+
+  // ── 카테고리 모달 내부 ──
+  modalCatList: {
+    marginBottom: 16,
+  },
+  modalCatRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 9,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  modalCatDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 10,
+  },
+  modalCatName: {
+    flex: 1,
+    fontSize: 14,
+    color: C.text,
+  },
+  modalCatDelText: {
+    fontSize: 13,
+    color: C.muted,
+    paddingHorizontal: 6,
+  },
+  catColorRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 7,
+    marginBottom: 14,
+  },
+  catColorOption: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+  },
+  catColorOptionActive: {
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  modalInputRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  catAddModalBtn: {
+    width: 42,
+    height: 42,
+    backgroundColor: C.text,
+    borderRadius: R.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  catAddModalBtnText: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: C.bg,
+  },
+
+  // ── ⋯ 드롭다운 메뉴 ──
+  menuDropdown: {
+    position: 'absolute',
+    top: 56,
+    right: 18,
+    backgroundColor: C.surface,
+    borderRadius: R.md,
+    borderWidth: 1,
+    borderColor: C.border2,
+    overflow: 'hidden',
+    minWidth: 140,
+    zIndex: 200,
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  menuItem: {
+    paddingVertical: 13,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  menuItemText: {
+    fontSize: 13,
+    color: C.text,
+  },
+});
+
+// 캘린더 + BLACK 전용 스타일 (index.js와 수치 동일)
+const calStyles = StyleSheet.create({
+  calOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.65)',
+  },
+  calSheet: {
+    backgroundColor: C.surface,
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 28,
+    paddingTop: 20,
+    paddingHorizontal: 18,
+    paddingBottom: 28,
+  },
+  calHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 16,
+  },
+  calNavBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: C.surface,
+    borderWidth: 1,
+    borderColor: C.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calNavText: {
+    fontSize: 18,
+    color: C.muted,
+    lineHeight: 20,
+  },
+  calTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    letterSpacing: -0.3,
+    color: C.text,
+  },
+  calDowRow: {
+    flexDirection: 'row',
+    marginBottom: 6,
+  },
+  calDowText: {
+    flex: 1,
+    textAlign: 'center',
+    fontSize: 10,
+    color: C.dim,
+  },
+  calGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    rowGap: 3,
+    columnGap: 0,
+  },
+  calCell: {
+    width: '14.285%',
+    alignItems: 'center',
+    gap: 2,
+    paddingVertical: 3,
+    paddingHorizontal: 1,
+    borderRadius: R.sm,
+  },
+  calCellSel: {
+    backgroundColor: '#222222',
+  },
+  calCircle: {
+    width: 30,
+    height: 30,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calCirclePlain: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: 'transparent',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  calCircleToday: {
+    backgroundColor: '#1a1a1a',
+    borderWidth: 1,
+    borderColor: C.border2,
+  },
+  calCircleSel: {
+    borderWidth: 1,
+    borderColor: '#444444',
+  },
+  calTodayDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: C.dim,
+  },
+  calDoneRing: {
+    position: 'absolute',
+    top: 0, left: 0, right: 0, bottom: 0,
+    borderRadius: 15,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.5)',
+  },
+  calRipple: {
+    position: 'absolute',
+    top: -4, left: -4, right: -4, bottom: -4,
+    borderRadius: 19,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.6)',
+  },
+  calDayNum: {
+    fontSize: 9,
+  },
+
+  // BLACK 메시지
+  blackMsgWrap: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  blackOrbCircle: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: '#fff',
+    marginBottom: 28,
+  },
+  blackTitle: {
+    fontSize: 28,
+    letterSpacing: 15,
+    color: '#fff',
+    fontWeight: '200',
+  },
+  blackSub: {
+    fontSize: 12,
+    color: '#555',
+    marginTop: 14,
+    letterSpacing: 1.4,
+  },
 });

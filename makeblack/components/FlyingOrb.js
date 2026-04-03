@@ -55,36 +55,33 @@ export default function FlyingOrb({ sx, sy, tx, ty, onDone }) {
   }, []);
 
   return (
-    // 외부 Animated.View: position + opacity (native driver)
-    <Animated.View
-      style={[
-        styles.container,
-        {
-          opacity: animOpacity,
-          transform: [{ translateX: animX }, { translateY: animY }],
-        },
-      ]}
-    >
-      {/* 내부 plain View: borderRadius + overflow: 'hidden' — Android clip 보장 */}
-      <View style={styles.clip} />
-    </Animated.View>
+    // 외부 View: 공간 차지 없는 고정 앵커
+    <View style={styles.wrapper}>
+      <Animated.View
+        style={[
+          styles.orb,
+          {
+            opacity: animOpacity,
+            transform: [{ translateX: animX }, { translateY: animY }],
+          },
+        ]}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  wrapper: {
     position: 'absolute',
     top: 0,
     left: 0,
-    width: 40,
-    height: 40,
-    zIndex: 350,
+    width: 0,
+    height: 0,
   },
-  clip: {
+  orb: {
     width: 40,
     height: 40,
     borderRadius: 20,
-    overflow: 'hidden',
     backgroundColor: '#ffffff',
   },
 });

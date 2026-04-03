@@ -160,6 +160,14 @@ export const createTeamCategory = async (teamId, userId, name, color) => {
   return data;
 };
 
+export const deleteTeamCategory = async (catId) => {
+  const { error } = await supabase
+    .from('team_categories')
+    .delete()
+    .eq('id', catId);
+  if (error) throw error;
+};
+
 // ── 팀 할일 ───────────────────────────────────────────
 export const fetchTeamTodos = async (teamId, date) => {
   const { data, error } = await supabase
@@ -229,6 +237,19 @@ export const upsertTeamPaletteHistory = async (teamId, date, drops, total) => {
   if (error) throw error;
 };
 
+// ── 팀 코드로 팀 검색 ─────────────────────────────────
+// 팀 코드 = team.id 앞 8자리 대문자
+export const findTeamByCode = async (code) => {
+  const upper = code.toUpperCase();
+  const { data, error } = await supabase
+    .from('teams')
+    .select('id, name, description, created_by');
+  if (error) throw error;
+  const found = data?.find(t => t.id.slice(0, 8).toUpperCase() === upper);
+  if (!found) throw new Error('존재하지 않는 팀 코드예요');
+  return found;
+};
+
 // ── 유저 검색 ─────────────────────────────────────────
 export const searchUsers = async (query) => {
   const { data, error } = await supabase
@@ -238,4 +259,72 @@ export const searchUsers = async (query) => {
     .limit(10);
   if (error) throw error;
   return data;
+};
+
+// ── 팀 참여 요청 ──────────────────────────────────────
+// Supabase 테이블 필요:
+// CREATE TABLE team_join_requests (
+//   id uuid DEFAULT gen_random_uuid() PRIMARY KEY,
+//   team_id uuid REFERENCES teams(id) ON DELETE CASCADE,
+//   requester_id uuid REFERENCES users(id),
+//   status text DEFAULT 'pending',  -- pending | accepted | rejected
+//   created_at timestamptz DEFAULT now(),
+//   UNIQUE(team_id, requester_id)
+// );
+// ALTER TABLE team_join_requests ENABLE ROW LEVEL SECURITY;
+// CREATE POLICY "team member can read" ON team_join_requests FOR SELECT USING (true);
+// CREATE POLICY "anyone can insert" ON team_join_requests FOR INSERT WITH CHECK (auth.uid() = requester_id);
+// CREATE POLICY "team owner can update" ON team_join_requests FOR UPDATE USING (true);
+
+export const createJoinRequest = async (teamId, requesterId) => {
+  const { data, error } = await supabase
+    .from('team_join_requests')
+    .insert({ team_id: teamId, requester_id: requesterId, status: 'pending' })
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+};
+
+export const fetchPendingRequests = async (teamId) => {
+  const { data, error } = await supabase
+    .from('team_join_requests')
+    .select('*, users(id, name, handle)')
+    .eq('team_id', teamId)
+    .eq('status', 'pending')
+    .order('created_at');
+  if (error) throw error;
+  return data ?? [];
+};
+
+export const acceptJoinRequest = async (requestId, teamId, requesterId) => {
+  // 1. color_index 배정
+  const { data: members } = await supabase
+    .from('team_members')
+    .select('color_index')
+    .eq('team_id', teamId);
+  const usedIndices = (members ?? []).map(m => m.color_index);
+  let idx = 0;
+  while (usedIndices.includes(idx)) idx++;
+
+  // 2. team_members INSERT
+  const { error: memberError } = await supabase
+    .from('team_members')
+    .insert({ team_id: teamId, user_id: requesterId, color_index: idx % 8 });
+  if (memberError) throw memberError;
+
+  // 3. request status 업데이트
+  const { error } = await supabase
+    .from('team_join_requests')
+    .update({ status: 'accepted' })
+    .eq('id', requestId);
+  if (error) throw error;
+};
+
+export const rejectJoinRequest = async (requestId) => {
+  const { error } = await supabase
+    .from('team_join_requests')
+    .update({ status: 'rejected' })
+    .eq('id', requestId);
+  if (error) throw error;
 };

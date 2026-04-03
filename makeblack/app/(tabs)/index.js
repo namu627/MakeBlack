@@ -848,14 +848,6 @@ export default function HomeScreen() {
               <Text style={styles.dragHandleText}>⠿</Text>
             </TouchableOpacity>
 
-            {/* 삭제 버튼 */}
-            <TouchableOpacity
-              onPress={() => setConfirmDelCat(cat.id)}
-              style={styles.catDeleteBtn}
-            >
-              <Text style={styles.catDeleteBtnText}>✕</Text>
-            </TouchableOpacity>
-
             {/* 할일 추가 버튼 */}
             <TouchableOpacity
               onPress={() => {
@@ -883,29 +875,6 @@ export default function HomeScreen() {
                   ]}
                 />
               ))}
-            </View>
-          )}
-
-          {/* 삭제 확인 */}
-          {confirmDelCat === cat.id && (
-            <View style={styles.confirmDelBox}>
-              <Text style={styles.confirmDelText}>
-                이 카테고리와 관련 할 일을 모두 삭제할까요?
-              </Text>
-              <View style={styles.confirmDelBtns}>
-                <TouchableOpacity
-                  onPress={() => setConfirmDelCat(null)}
-                  style={styles.confirmCancelBtn}
-                >
-                  <Text style={styles.confirmCancelBtnText}>취소</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  onPress={() => handleDeleteCategory(cat.id)}
-                  style={styles.confirmDeleteBtn}
-                >
-                  <Text style={styles.confirmDeleteBtnText}>삭제</Text>
-                </TouchableOpacity>
-              </View>
             </View>
           )}
 
@@ -964,7 +933,7 @@ export default function HomeScreen() {
               <View style={styles.modalHandle} />
               {/* 타이틀 */}
               <View style={styles.modalTitleRow}>
-                <Text style={styles.modalTitle}>카테고리 추가</Text>
+                <Text style={styles.modalTitle}>카테고리 관리</Text>
                 <TouchableOpacity
                   onPress={() => setShowCatModal(false)}
                   style={styles.modalCloseBtn}
@@ -972,6 +941,33 @@ export default function HomeScreen() {
                   <Text style={styles.modalCloseBtnText}>✕</Text>
                 </TouchableOpacity>
               </View>
+              {/* 기존 카테고리 목록 */}
+              {categories.length > 0 && (
+                <View style={styles.modalCatList}>
+                  {categories.map(cat => (
+                    <View key={cat.id} style={styles.modalCatRow}>
+                      <View style={[styles.modalCatDot, { backgroundColor: cat.color }]} />
+                      <Text style={styles.modalCatName}>{cat.name}</Text>
+                      <TouchableOpacity
+                        onPress={() =>
+                          Alert.alert(
+                            '카테고리 삭제',
+                            `'${cat.name}'과 관련 할 일을 모두 삭제할까요?`,
+                            [
+                              { text: '취소', style: 'cancel' },
+                              { text: '삭제', style: 'destructive', onPress: () => handleDeleteCategory(cat.id) },
+                            ]
+                          )
+                        }
+                        style={styles.modalCatDelBtn}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Text style={styles.modalCatDelBtnText}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
               {/* 색상 팔레트 */}
               <View style={styles.catColorRow}>
                 {CAT_COLORS.map(color => (
@@ -1043,17 +1039,21 @@ export default function HomeScreen() {
     });
   }, [blackPhase]);
 
-  // 'text' — 텍스트+공 1000ms 표시 → 300ms 페이드아웃 → 'orb'
+  // 'text' — 200ms 페이드인 → 700ms 표시 → 200ms 페이드아웃 → 'orb'
   useEffect(() => {
     if (blackPhase !== 'text') return;
-    blackTextAnim.setValue(1);
-    blackTimer.current = setTimeout(() => {
-      Animated.timing(blackTextAnim, {
-        toValue: 0, duration: 200, useNativeDriver: true,
-      }).start(({ finished }) => {
-        if (finished) setBlackPhase('orb');
-      });
-    }, 700);
+    blackTextAnim.setValue(0);
+    Animated.timing(blackTextAnim, {
+      toValue: 1, duration: 200, useNativeDriver: true,
+    }).start(() => {
+      blackTimer.current = setTimeout(() => {
+        Animated.timing(blackTextAnim, {
+          toValue: 0, duration: 200, useNativeDriver: true,
+        }).start(({ finished }) => {
+          if (finished) setBlackPhase('orb');
+        });
+      }, 700);
+    });
     return () => clearTimeout(blackTimer.current);
   }, [blackPhase]);
 
@@ -1083,7 +1083,7 @@ export default function HomeScreen() {
     rippleOpacity.setValue(0.6);
     Animated.parallel([
       Animated.timing(stampScale, {
-        toValue: 1, duration: 400, useNativeDriver: true,
+        toValue: 1, duration: 300, useNativeDriver: true,
       }),
       Animated.timing(stampOpacity, {
         toValue: 1, duration: 300, useNativeDriver: true,
@@ -1092,10 +1092,10 @@ export default function HomeScreen() {
         Animated.delay(80),
         Animated.parallel([
           Animated.timing(rippleScale, {
-            toValue: 2.2, duration: 600, useNativeDriver: true,
+            toValue: 2.2, duration: 300, useNativeDriver: true,
           }),
           Animated.timing(rippleOpacity, {
-            toValue: 0, duration: 600, useNativeDriver: true,
+            toValue: 0, duration: 300, useNativeDriver: true,
           }),
         ]),
       ]),
@@ -1104,7 +1104,7 @@ export default function HomeScreen() {
         closeCalendar();
         setBlackPhase(null);
         setStampDate(null);
-      }, 700);
+      }, 250);
     });
 
     return () => {
@@ -2124,6 +2124,37 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: C.bg,
   },
+  modalCatList: {
+    marginBottom: 16,
+    gap: 2,
+  },
+  modalCatRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 9,
+    paddingHorizontal: 4,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  modalCatDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    marginRight: 10,
+  },
+  modalCatName: {
+    flex: 1,
+    fontSize: 14,
+    color: C.text,
+  },
+  modalCatDelBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  modalCatDelBtnText: {
+    fontSize: 13,
+    color: C.muted,
+  },
 
   // ── BLACK 달성 메시지 (makeblack.jsx 동일) ──
   blackMsgWrap: {
@@ -2136,10 +2167,6 @@ const styles = StyleSheet.create({
     borderRadius: 40,
     backgroundColor: '#fff',
     marginBottom: 28,
-    shadowColor: '#fff',
-    shadowOpacity: 0.4,
-    shadowRadius: 40,
-    elevation: 8,
   },
   blackTitle: {
     fontSize: 28,
