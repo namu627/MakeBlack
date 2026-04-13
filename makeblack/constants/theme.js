@@ -52,6 +52,12 @@ export const MEMBER_HUE_PALETTE = [
   { hue: 340, label: '핑크',   base: '#ef476f' },
 ];
 
+export const STORAGE_KEYS = {
+  SETTINGS:   '@makeblack_settings',
+  ONBOARDING: 'onboarding_done',
+  PIN:        '@makeblack_pin',
+};
+
 export const DEFAULT_SETTINGS = {
   calStartSunday:      true,
   use24h:              false,

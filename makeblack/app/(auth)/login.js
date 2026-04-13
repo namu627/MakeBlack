@@ -2,28 +2,33 @@ import { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, KeyboardAvoidingView, Platform,
-  ActivityIndicator, Alert
+  ActivityIndicator,
 } from 'react-native';
 import { router } from 'expo-router';
 import { supabase } from '../../lib/supabase';
+import { THEMES } from '../../constants/theme';
+
+const C = THEMES.dark;
 
 export default function LoginScreen() {
-  const [email, setEmail] = useState('');
+  const [email,    setEmail]    = useState('');
   const [password, setPassword] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState('');
 
   const handleLogin = async () => {
+    setError('');
     if (!email || !password) {
-      Alert.alert('입력 오류', '이메일과 비밀번호를 입력해주세요');
+      setError('이메일과 비밀번호를 입력해주세요');
       return;
     }
 
     setLoading(true);
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
     setLoading(false);
 
-    if (error) {
-      Alert.alert('로그인 실패', '이메일 또는 비밀번호가 올바르지 않아요');
+    if (err) {
+      setError('이메일 또는 비밀번호가 올바르지 않아요');
     }
     // 성공 시 _layout.js의 onAuthStateChange가 자동으로 탭 화면으로 이동
   };
@@ -34,10 +39,12 @@ export default function LoginScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <View style={styles.inner}>
-        {/* 로고 */}
-        <View style={styles.logoArea}>
-          <Text style={styles.logoText}>MakeBlack</Text>
-          <Text style={styles.logoSub}>오늘 팔레트를 채워보세요</Text>
+        {/* 상단 타이틀 */}
+        <Text style={styles.appTitle}>makeblack</Text>
+
+        {/* 메인 타이틀 */}
+        <View style={styles.titleArea}>
+          <Text style={styles.title}>로그인</Text>
         </View>
 
         {/* 입력 폼 */}
@@ -45,9 +52,9 @@ export default function LoginScreen() {
           <TextInput
             style={styles.input}
             placeholder="이메일"
-            placeholderTextColor="#555"
+            placeholderTextColor={C.dim}
             value={email}
-            onChangeText={setEmail}
+            onChangeText={t => { setEmail(t); setError(''); }}
             keyboardType="email-address"
             autoCapitalize="none"
             autoCorrect={false}
@@ -55,11 +62,13 @@ export default function LoginScreen() {
           <TextInput
             style={styles.input}
             placeholder="비밀번호"
-            placeholderTextColor="#555"
+            placeholderTextColor={C.dim}
             value={password}
-            onChangeText={setPassword}
+            onChangeText={t => { setPassword(t); setError(''); }}
             secureTextEntry
           />
+
+          {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
           <TouchableOpacity
             style={[styles.btn, loading && styles.btnDisabled]}
@@ -67,63 +76,93 @@ export default function LoginScreen() {
             disabled={loading}
           >
             {loading
-              ? <ActivityIndicator color="#fff" />
+              ? <ActivityIndicator color={C.text} />
               : <Text style={styles.btnText}>로그인</Text>
             }
           </TouchableOpacity>
         </View>
 
-        {/* 회원가입 링크 */}
-        <TouchableOpacity onPress={() => router.push('/(auth)/signup')}>
-          <Text style={styles.linkText}>
-            계정이 없으신가요? <Text style={styles.linkBold}>회원가입</Text>
-          </Text>
-        </TouchableOpacity>
+        {/* 하단 링크 */}
+        <View style={styles.links}>
+          <TouchableOpacity onPress={() => router.push('/(auth)/signup')}>
+            <Text style={styles.linkText}>계정이 없으신가요? <Text style={styles.linkBold}>회원가입</Text></Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => {}}>
+            <Text style={styles.linkMuted}>비밀번호를 잊으셨나요?</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: C.bg },
   inner: {
     flex: 1,
     justifyContent: 'center',
     paddingHorizontal: 28,
     gap: 32,
   },
-  logoArea: { alignItems: 'center', gap: 8 },
-  logoText: {
-    fontSize: 36,
-    fontWeight: '800',
-    color: '#f0ece6',
-    letterSpacing: -1,
+  appTitle: {
+    fontSize: 9,
+    color: C.dim,
+    letterSpacing: 2,
+    textAlign: 'center',
+    textTransform: 'lowercase',
   },
-  logoSub: { fontSize: 14, color: '#666' },
-  form: { gap: 12 },
+  titleArea: { alignItems: 'center' },
+  title: {
+    fontSize: 26,
+    fontWeight: '700',
+    color: C.text,
+    letterSpacing: -0.5,
+  },
+  form: { gap: 10 },
   input: {
-    backgroundColor: '#181818',
-    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderRadius: 16,
     paddingHorizontal: 16,
     paddingVertical: 14,
-    color: '#f0ece6',
-    fontSize: 15,
+    color: C.text,
+    fontSize: 14,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: C.border,
+  },
+  errorText: {
+    color: '#ff5555',
+    fontSize: 12,
+    marginLeft: 4,
   },
   btn: {
-    backgroundColor: '#f0ece6',
-    borderRadius: 12,
-    paddingVertical: 15,
+    borderRadius: 16,
+    paddingVertical: 14,
     alignItems: 'center',
     marginTop: 4,
+    borderWidth: 1,
+    borderColor: C.text,
   },
-  btnDisabled: { opacity: 0.5 },
+  btnDisabled: { opacity: 0.4 },
   btnText: {
-    color: '#0a0a0a',
-    fontSize: 15,
-    fontWeight: '700',
+    color: C.text,
+    fontSize: 14,
+    fontWeight: '600',
   },
-  linkText: { textAlign: 'center', color: '#555', fontSize: 14 },
-  linkBold: { color: '#f0ece6', fontWeight: '600' },
+  links: {
+    alignItems: 'center',
+    gap: 12,
+  },
+  linkText: {
+    textAlign: 'center',
+    color: C.dim,
+    fontSize: 13,
+  },
+  linkBold: {
+    color: C.muted,
+    fontWeight: '600',
+  },
+  linkMuted: {
+    color: C.dim,
+    fontSize: 12,
+  },
 });

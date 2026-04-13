@@ -2,47 +2,46 @@ import { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, KeyboardAvoidingView, Platform,
-  ActivityIndicator, Alert, ScrollView
+  ActivityIndicator, ScrollView, Alert,
 } from 'react-native';
 import { router } from 'expo-router';
 import { supabase } from '../../lib/supabase';
+import { THEMES } from '../../constants/theme';
+
+const C = THEMES.dark;
 
 export default function SignupScreen() {
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
+  const [name,     setName]     = useState('');
+  const [email,    setEmail]    = useState('');
   const [password, setPassword] = useState('');
-  const [passwordConfirm, setPasswordConfirm] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState('');
 
   const validate = () => {
-    if (!name.trim()) return '이름을 입력해주세요';
-    if (!email.includes('@')) return '올바른 이메일을 입력해주세요';
-    if (password.length < 8) return '비밀번호는 8자 이상이어야 해요';
-    if (password !== passwordConfirm) return '비밀번호가 일치하지 않아요';
+    if (!name.trim())           return '이름을 입력해주세요';
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return '올바른 이메일을 입력해주세요';
+    if (password.length < 8)    return '비밀번호는 8자 이상이어야 해요';
     return null;
   };
 
   const handleSignup = async () => {
+    setError('');
     const errMsg = validate();
-    if (errMsg) {
-      Alert.alert('입력 오류', errMsg);
-      return;
-    }
+    if (errMsg) { setError(errMsg); return; }
 
     setLoading(true);
-    const { data, error } = await supabase.auth.signUp({
+    const { data, error: err } = await supabase.auth.signUp({
       email,
       password,
-      options: { data: { name } },  // user_metadata에 이름 저장
+      options: { data: { name } },
     });
     setLoading(false);
 
-    if (error) {
-      Alert.alert('회원가입 실패', error.message);
+    if (err) {
+      setError(err.message);
       return;
     }
 
-    // 이메일 인증이 필요한 경우
     if (data.user && !data.session) {
       Alert.alert(
         '이메일 인증 필요',
@@ -51,9 +50,6 @@ export default function SignupScreen() {
       );
       return;
     }
-
-    // 이메일 인증 없이 바로 세션 생성된 경우 (Supabase 설정에 따라)
-    // → _layout.js가 자동으로 핸들 설정 화면 또는 탭으로 이동
   };
 
   return (
@@ -62,65 +58,43 @@ export default function SignupScreen() {
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
     >
       <ScrollView contentContainerStyle={styles.inner} keyboardShouldPersistTaps="handled">
-        {/* 헤더 */}
-        <View style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
-            <Text style={styles.backText}>← 뒤로</Text>
-          </TouchableOpacity>
+        {/* 상단 타이틀 */}
+        <Text style={styles.appTitle}>makeblack</Text>
+
+        {/* 메인 타이틀 */}
+        <View style={styles.titleArea}>
           <Text style={styles.title}>회원가입</Text>
-          <Text style={styles.sub}>팔레트를 채울 준비가 됐나요?</Text>
         </View>
 
         {/* 폼 */}
         <View style={styles.form}>
-          <View style={styles.fieldGroup}>
-            <Text style={styles.label}>이름</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="표시될 이름"
-              placeholderTextColor="#555"
-              value={name}
-              onChangeText={setName}
-            />
-          </View>
+          <TextInput
+            style={styles.input}
+            placeholder="이름"
+            placeholderTextColor={C.dim}
+            value={name}
+            onChangeText={t => { setName(t); setError(''); }}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="이메일"
+            placeholderTextColor={C.dim}
+            value={email}
+            onChangeText={t => { setEmail(t); setError(''); }}
+            keyboardType="email-address"
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
+          <TextInput
+            style={styles.input}
+            placeholder="비밀번호 (8자 이상)"
+            placeholderTextColor={C.dim}
+            value={password}
+            onChangeText={t => { setPassword(t); setError(''); }}
+            secureTextEntry
+          />
 
-          <View style={styles.fieldGroup}>
-            <Text style={styles.label}>이메일</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="example@email.com"
-              placeholderTextColor="#555"
-              value={email}
-              onChangeText={setEmail}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-          </View>
-
-          <View style={styles.fieldGroup}>
-            <Text style={styles.label}>비밀번호</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="8자 이상"
-              placeholderTextColor="#555"
-              value={password}
-              onChangeText={setPassword}
-              secureTextEntry
-            />
-          </View>
-
-          <View style={styles.fieldGroup}>
-            <Text style={styles.label}>비밀번호 확인</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="비밀번호 재입력"
-              placeholderTextColor="#555"
-              value={passwordConfirm}
-              onChangeText={setPasswordConfirm}
-              secureTextEntry
-            />
-          </View>
+          {error ? <Text style={styles.errorText}>{error}</Text> : null}
 
           <TouchableOpacity
             style={[styles.btn, loading && styles.btnDisabled]}
@@ -128,9 +102,16 @@ export default function SignupScreen() {
             disabled={loading}
           >
             {loading
-              ? <ActivityIndicator color="#0a0a0a" />
-              : <Text style={styles.btnText}>시작하기</Text>
+              ? <ActivityIndicator color={C.text} />
+              : <Text style={styles.btnText}>가입하기</Text>
             }
+          </TouchableOpacity>
+        </View>
+
+        {/* 하단 링크 */}
+        <View style={styles.links}>
+          <TouchableOpacity onPress={() => router.replace('/(auth)/login')}>
+            <Text style={styles.linkText}>이미 계정이 있으신가요? <Text style={styles.linkBold}>로그인</Text></Text>
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -139,48 +120,68 @@ export default function SignupScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0a0a0a' },
+  container: { flex: 1, backgroundColor: C.bg },
   inner: {
     flexGrow: 1,
+    justifyContent: 'center',
     paddingHorizontal: 28,
-    paddingTop: 60,
-    paddingBottom: 40,
+    paddingVertical: 60,
     gap: 32,
   },
-  header: { gap: 8 },
-  backBtn: { marginBottom: 8 },
-  backText: { color: '#666', fontSize: 14 },
+  appTitle: {
+    fontSize: 9,
+    color: C.dim,
+    letterSpacing: 2,
+    textAlign: 'center',
+    textTransform: 'lowercase',
+  },
+  titleArea: { alignItems: 'center' },
   title: {
-    fontSize: 28,
-    fontWeight: '800',
-    color: '#f0ece6',
+    fontSize: 26,
+    fontWeight: '700',
+    color: C.text,
     letterSpacing: -0.5,
   },
-  sub: { fontSize: 14, color: '#666' },
-  form: { gap: 16 },
-  fieldGroup: { gap: 6 },
-  label: { fontSize: 13, color: '#888', marginLeft: 4 },
+  form: { gap: 10 },
   input: {
-    backgroundColor: '#181818',
-    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderRadius: 16,
     paddingHorizontal: 16,
     paddingVertical: 14,
-    color: '#f0ece6',
-    fontSize: 15,
+    color: C.text,
+    fontSize: 14,
     borderWidth: 1,
-    borderColor: '#2a2a2a',
+    borderColor: C.border,
+  },
+  errorText: {
+    color: '#ff5555',
+    fontSize: 12,
+    marginLeft: 4,
   },
   btn: {
-    backgroundColor: '#f0ece6',
-    borderRadius: 12,
-    paddingVertical: 15,
+    borderRadius: 16,
+    paddingVertical: 14,
     alignItems: 'center',
-    marginTop: 8,
+    marginTop: 4,
+    borderWidth: 1,
+    borderColor: C.text,
   },
-  btnDisabled: { opacity: 0.5 },
+  btnDisabled: { opacity: 0.4 },
   btnText: {
-    color: '#0a0a0a',
-    fontSize: 15,
-    fontWeight: '700',
+    color: C.text,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  links: {
+    alignItems: 'center',
+  },
+  linkText: {
+    textAlign: 'center',
+    color: C.dim,
+    fontSize: 13,
+  },
+  linkBold: {
+    color: C.muted,
+    fontWeight: '600',
   },
 });

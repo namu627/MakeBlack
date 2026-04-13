@@ -4,7 +4,7 @@ export const hslToRgb = (h, s, l) => {
   const k = n => (n + h / 30) % 12;
   const a = s * Math.min(l, 1 - l);
   const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-  return [f(0) * 255, f(8) * 255, f(4) * 255];
+  return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
 };
 
 export const rgbToHsl = (r, g, b) => {
@@ -60,10 +60,6 @@ export const generateUniqueColor = (usedHues = []) => {
   return { hue, rgb, color: `hsl(${hue},82%,54%)` };
 };
 
-// 기존 service 파일과 호환 — generateTodoColor alias
-export const generateTodoColor = (catColor, usedHues = []) => {
-  return generateUniqueColor(usedHues);
-};
 
 // ── 날짜 유틸 ──────────────────────────────────────────
 export const dateKey = (d = new Date()) => {

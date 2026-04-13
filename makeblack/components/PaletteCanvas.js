@@ -283,10 +283,10 @@ export default function PaletteCanvas({
         showsVerticalScrollIndicator={false}
         javaScriptEnabled={true}
         domStorageEnabled={true}
-        originWhitelist={['*']}
-        allowFileAccess={true}
-        allowUniversalAccessFromFileURLs={true}
-        mixedContentMode="always"
+        originWhitelist={['about:*', 'blob:*']}
+        allowFileAccess={false}
+        allowUniversalAccessFromFileURLs={false}
+        mixedContentMode="never"
         androidLayerType="software"
       />
     </View>

@@ -1,20 +1,22 @@
 import { supabase } from './supabase';
+import { MEMBER_HUE_PALETTE } from '../constants/theme';
 
-const MEMBER_HUE_PALETTE = [
-  { hue: 220, color: '#6c8fff' },
-  { hue: 0,   color: '#ff6b6b' },
-  { hue: 140, color: '#5ce65c' },
-  { hue: 45,  color: '#ffd166' },
-  { hue: 280, color: '#c77dff' },
-  { hue: 180, color: '#4ecdc4' },
-  { hue: 25,  color: '#f77f00' },
-  { hue: 320, color: '#ff6eb4' },
-];
+export const getMemberColor = (colorIndex) => {
+  const idx = typeof colorIndex === 'number' && isFinite(colorIndex)
+    ? colorIndex % MEMBER_HUE_PALETTE.length
+    : 0;
+  const p = MEMBER_HUE_PALETTE[idx] ?? MEMBER_HUE_PALETTE[0];
+  return { hue: p.hue, color: p.base };
+};
 
-export const getMemberColor = (colorIndex) =>
-  MEMBER_HUE_PALETTE[colorIndex % MEMBER_HUE_PALETTE.length];
+// 사용 중인 color_index 배열에서 비어있는 가장 작은 번호 반환
+const getNextColorIndex = (usedIndices) => {
+  let idx = 0;
+  while (usedIndices.includes(idx)) idx++;
+  return idx % MEMBER_HUE_PALETTE.length;
+};
 
-// ── 팀 목록 ───────────────────────────────────────────
+// ── 팀 목록 (members 포함 — 팀 목록 카드에서 별도 fetchTeamDetail 불필요) ──
 export const fetchMyTeams = async (userId) => {
   const { data, error } = await supabase
     .from('team_members')
@@ -22,7 +24,11 @@ export const fetchMyTeams = async (userId) => {
       color_index,
       joined_at,
       teams (
-        id, name, description, created_by, created_at
+        id, name, description, created_by, created_at,
+        team_members (
+          user_id, color_index, joined_at,
+          users (id, name, handle, avatar_url)
+        )
       )
     `)
     .eq('user_id', userId);
@@ -32,27 +38,17 @@ export const fetchMyTeams = async (userId) => {
 
 // ── 팀 생성 ───────────────────────────────────────────
 export const createTeam = async (userId, name, description) => {
-  console.log('createTeam 시도:', userId, name, description);
-  
   const { data: team, error: teamError } = await supabase
     .from('teams')
     .insert({ name, description, created_by: userId })
     .select()
     .single();
-  
-  if (teamError) {
-    console.log('팀 생성 에러:', JSON.stringify(teamError));
-    throw teamError;
-  }
+  if (teamError) throw teamError;
 
   const { error: memberError } = await supabase
     .from('team_members')
     .insert({ team_id: team.id, user_id: userId, color_index: 0 });
-  
-  if (memberError) {
-    console.log('멤버 추가 에러:', JSON.stringify(memberError));
-    throw memberError;
-  }
+  if (memberError) throw memberError;
 
   return team;
 };
@@ -65,7 +61,7 @@ export const fetchTeamDetail = async (teamId) => {
       *,
       team_members (
         user_id, color_index, joined_at,
-        users (id, name, handle, email)
+        users (id, name, handle, email, avatar_url)
       )
     `)
     .eq('id', teamId)
@@ -126,14 +122,12 @@ export const inviteMember = async (teamId, handle) => {
     .from('team_members')
     .select('color_index')
     .eq('team_id', teamId);
-  const usedIndices = members.map(m => m.color_index);
-  let idx = 0;
-  while (usedIndices.includes(idx)) idx++;
+  const idx = getNextColorIndex((members ?? []).map(m => m.color_index));
 
   // 4. 멤버 추가
   const { error: insertError } = await supabase
     .from('team_members')
-    .insert({ team_id: teamId, user_id: user.id, color_index: idx % 8 });
+    .insert({ team_id: teamId, user_id: user.id, color_index: idx });
   if (insertError) throw insertError;
 
   return user;
@@ -238,24 +232,35 @@ export const upsertTeamPaletteHistory = async (teamId, date, drops, total) => {
 };
 
 // ── 팀 코드로 팀 검색 ─────────────────────────────────
-// 팀 코드 = team.id 앞 8자리 대문자
+// 팀 코드 = team.id(UUID) 앞 8자리 대문자
+// UUID 범위 쿼리로 인덱스 활용 — 전체 테이블 스캔 방지
 export const findTeamByCode = async (code) => {
-  const upper = code.toUpperCase();
+  const lower = code.toLowerCase();
+  // UUID 앞 8자리가 같은 범위: lo ~ hi 로 좁힌 후 정확히 비교
+  const lo = `${lower}-0000-0000-0000-000000000000`;
+  const hi = `${lower}-ffff-ffff-ffff-ffffffffffff`;
   const { data, error } = await supabase
     .from('teams')
-    .select('id, name, description, created_by');
+    .select('id, name, description, created_by')
+    .gte('id', lo)
+    .lte('id', hi)
+    .limit(5);
   if (error) throw error;
-  const found = data?.find(t => t.id.slice(0, 8).toUpperCase() === upper);
+  const found = data?.find(t => t.id.slice(0, 8).toUpperCase() === code.toUpperCase());
   if (!found) throw new Error('존재하지 않는 팀 코드예요');
   return found;
 };
 
 // ── 유저 검색 ─────────────────────────────────────────
 export const searchUsers = async (query) => {
+  // PostgREST .or() 필터 문자열에 사용자 입력이 직접 삽입되므로
+  // 쉼표·괄호 등 필터 구문을 깨는 문자를 제거
+  const safe = query.replace(/[,.()\[\]]/g, '').trim();
+  if (!safe) return [];
   const { data, error } = await supabase
     .from('users')
-    .select('id, name, handle, email')
-    .or(`name.ilike.%${query}%,handle.ilike.%${query}%`)
+    .select('id, name, handle')
+    .or(`name.ilike.%${safe}%,handle.ilike.%${safe}%`)
     .limit(10);
   if (error) throw error;
   return data;
@@ -303,14 +308,12 @@ export const acceptJoinRequest = async (requestId, teamId, requesterId) => {
     .from('team_members')
     .select('color_index')
     .eq('team_id', teamId);
-  const usedIndices = (members ?? []).map(m => m.color_index);
-  let idx = 0;
-  while (usedIndices.includes(idx)) idx++;
+  const idx = getNextColorIndex((members ?? []).map(m => m.color_index));
 
   // 2. team_members INSERT
   const { error: memberError } = await supabase
     .from('team_members')
-    .insert({ team_id: teamId, user_id: requesterId, color_index: idx % 8 });
+    .insert({ team_id: teamId, user_id: requesterId, color_index: idx });
   if (memberError) throw memberError;
 
   // 3. request status 업데이트
@@ -326,5 +329,29 @@ export const rejectJoinRequest = async (requestId) => {
     .from('team_join_requests')
     .update({ status: 'rejected' })
     .eq('id', requestId);
+  if (error) throw error;
+};
+
+// ── 방장의 직접 초대 (userId로 즉시 팀원 추가) ───────────
+export const addTeamMember = async (teamId, userId) => {
+  // 이미 멤버인지 확인
+  const { data: existing } = await supabase
+    .from('team_members')
+    .select('user_id')
+    .eq('team_id', teamId)
+    .eq('user_id', userId)
+    .single();
+  if (existing) throw new Error('이미 팀원이에요');
+
+  // color_index 배정 (빈 슬롯 중 가장 작은 번호)
+  const { data: members } = await supabase
+    .from('team_members')
+    .select('color_index')
+    .eq('team_id', teamId);
+  const idx = getNextColorIndex((members ?? []).map(m => m.color_index));
+
+  const { error } = await supabase
+    .from('team_members')
+    .insert({ team_id: teamId, user_id: userId, color_index: idx });
   if (error) throw error;
 };

@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(wc:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(claude:*)",
+      "Bash(npm install:*)"
     ]
   }
 }

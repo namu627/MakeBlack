@@ -13,21 +13,24 @@
 // ─────────────────────────────────────────────────────
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from 'expo-router';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
   StyleSheet, ActivityIndicator, Alert, Modal, Animated,
-  Dimensions, KeyboardAvoidingView, Platform,
+  Dimensions, KeyboardAvoidingView, Platform, Image, Pressable,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../lib/supabase';
-import { dateKey, addDays, generateTodoColor, hslToRgb } from '../../lib/colorMath';
+import { dateKey, hslToRgb } from '../../lib/colorMath';
+import { THEMES, radius, STORAGE_KEYS } from '../../constants/theme';
 import {
   fetchMyTeams, createTeam, fetchTeamDetail,
   updateTeam, deleteTeam, leaveTeam,
   fetchTeamCategories, createTeamCategory, deleteTeamCategory,
   fetchTeamTodos, createTeamTodo, toggleTeamTodo, deleteTeamTodo,
   fetchTeamPaletteHistory, upsertTeamPaletteHistory,
-  getMemberColor, searchUsers, inviteMember,
+  getMemberColor, searchUsers, addTeamMember,
   createJoinRequest, fetchPendingRequests, acceptJoinRequest, rejectJoinRequest,
   findTeamByCode,
 } from '../../lib/teamService';
@@ -36,31 +39,42 @@ import FlyingOrb from '../../components/FlyingOrb';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 
-const C = {
-  bg:          '#0a0a0a',
-  surface:     '#141414',
-  card:        '#181818',
-  border:      '#242424',
-  border2:     '#2e2e2e',
-  text:        '#f0ece6',
-  muted:       '#888888',
-  dim:         '#555555',
-  paletteBase: '#0d0c0b',
-};
-
-const R = { sm: 10, md: 16, lg: 22, full: 999 };
+const C = THEMES.dark;
+const R = radius;
 
 const CAT_COLORS = [
   '#ff6b6b', '#ffd166', '#06d6a0', '#4ecdc4',
   '#6c8fff', '#c77dff', '#f77f00', '#4cc9f0',
 ];
 
+// ── 멤버 아바타 컴포넌트 ─────────────────────────────────
+const MemberAvatar = ({ member, size = 32 }) => {
+  const avatarUrl = member.users?.avatar_url;
+  const letter = (member.users?.name || member.users?.handle || '?')[0].toUpperCase();
+  const color = getMemberColor(member?.color_index)?.color ?? '#888888';
+  return (
+    <View style={{
+      width: size, height: size, borderRadius: size / 2,
+      backgroundColor: color, overflow: 'hidden',
+      alignItems: 'center', justifyContent: 'center',
+    }}>
+      {avatarUrl
+        ? <Image source={{ uri: avatarUrl }} style={{ width: size, height: size }} />
+        : <Text style={{ color: '#fff', fontSize: size * 0.4, fontWeight: '700', lineHeight: size }}>
+            {letter}
+          </Text>
+      }
+    </View>
+  );
+};
+
+
 // 멤버 colorIndex → 팔레트 drop 데이터 생성
 // getMemberColor(idx) = { hue, color(hex) } → drop { hue, rgb, color }
 function memberColorToDrop(colorIndex) {
-  const { hue, color } = getMemberColor(colorIndex);
-  const rgb = hslToRgb(hue, 82, 54);
-  return { hue, rgb, color };
+  const mc = getMemberColor(colorIndex) ?? { hue: 0, color: '#888888' };
+  const rgb = hslToRgb(mc.hue, 82, 54);
+  return { hue: mc.hue, rgb, color: mc.color };
 }
 
 // ══════════════════════════════════════════════════════
@@ -68,6 +82,8 @@ function memberColorToDrop(colorIndex) {
 // ══════════════════════════════════════════════════════
 
 export default function TeamScreen() {
+  const insets = useSafeAreaInsets();
+
   // ── state ────────────────────────────────────────────
   const [userId, setUserId]             = useState(null);
   const [teams, setTeams]               = useState([]);
@@ -75,6 +91,7 @@ export default function TeamScreen() {
   const [selectedTeam, setSelectedTeam] = useState(null);
   const [showCreate, setShowCreate]     = useState(false);
   const [searchQuery, setSearchQuery]   = useState('');
+  const [teamCreatedInfo, setTeamCreatedInfo] = useState(null); // null 또는 { name, code }
 
   // ── 코드로 팀 참여 ────────────────────────────────────
   const [showJoin, setShowJoin]           = useState(false);
@@ -113,24 +130,22 @@ export default function TeamScreen() {
   }, [userId]);
 
   // ── 팀 목록 로드 ──────────────────────────────────────
+  // fetchMyTeams가 team_members까지 포함하므로 fetchTeamDetail 별도 호출 불필요
   const loadTeams = async () => {
     setLoading(true);
     try {
       const data = await fetchMyTeams(userId);
       const enriched = await Promise.all(data.map(async (team) => {
         try {
-          const [detail, palette] = await Promise.all([
-            fetchTeamDetail(team.id),
-            fetchTeamPaletteHistory(team.id, dateKey()),
-          ]);
+          const palette = await fetchTeamPaletteHistory(team.id, dateKey());
           return {
             ...team,
-            members: detail.team_members ?? [],
+            members: team.team_members ?? [],
             todayDrops: palette.drops ?? [],
             todayTotal: palette.total ?? 0,
           };
         } catch {
-          return { ...team, members: [], todayDrops: [], todayTotal: 0 };
+          return { ...team, members: team.team_members ?? [], todayDrops: [], todayTotal: 0 };
         }
       }));
       setTeams(enriched);
@@ -148,7 +163,7 @@ export default function TeamScreen() {
       setShowCreate(false);
       await loadTeams();
       const code = team.id.slice(0, 8).toUpperCase();
-      Alert.alert('팀 생성 완료 🎉', `팀 코드: ${code}\n멤버들에게 공유하세요.`);
+      setTeamCreatedInfo({ name: team.name, code });
       setSelectedTeam({ ...team, members: [], todayDrops: [], todayTotal: 0 });
     } catch {
       Alert.alert('오류', '팀 생성에 실패했어요');
@@ -234,16 +249,16 @@ export default function TeamScreen() {
   return (
     <View style={styles.root}>
       {/* 헤더 */}
-      <View style={styles.listHeader}>
+      <View style={[styles.listHeader, { paddingTop: insets.top + 8 }]}>
         <View>
           <Text style={styles.listHeaderLabel}>makeblack</Text>
           <Text style={styles.listHeaderTitle}>팀</Text>
         </View>
         <View style={styles.headerBtnGroup}>
-          <TouchableOpacity style={styles.joinBtn} onPress={() => setShowJoin(true)}>
+          <TouchableOpacity style={styles.joinBtn} onPress={() => setShowJoin(true)} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={styles.joinBtnText}>코드로 참여</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.createBtn} onPress={() => setShowCreate(true)}>
+          <TouchableOpacity style={styles.createBtn} onPress={() => setShowCreate(true)} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={styles.createBtnText}>+ 팀 만들기</Text>
           </TouchableOpacity>
         </View>
@@ -267,7 +282,7 @@ export default function TeamScreen() {
             <Text style={styles.emptyIcon}>◈</Text>
             <Text style={styles.emptyTitle}>아직 팀이 없어요</Text>
             <Text style={styles.emptyDesc}>+ 팀 만들기로 시작해보세요</Text>
-            <TouchableOpacity style={styles.emptyBtn} onPress={() => setShowCreate(true)}>
+            <TouchableOpacity style={styles.emptyBtn} onPress={() => setShowCreate(true)} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={styles.emptyBtnText}>+ 팀 만들기</Text>
             </TouchableOpacity>
           </View>
@@ -283,7 +298,8 @@ export default function TeamScreen() {
                 key={team.id}
                 style={styles.teamCard}
                 onPress={() => setSelectedTeam(team)}
-                activeOpacity={0.75}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 {/* 팔레트 미니 + 정보 */}
                 <View style={styles.teamCardRow}>
@@ -308,7 +324,7 @@ export default function TeamScreen() {
                   {team.members.slice(0, 6).map(m => (
                     <View
                       key={m.user_id}
-                      style={[styles.memberDot, { backgroundColor: getMemberColor(m.color_index).color }]}
+                      style={[styles.memberDot, { backgroundColor: getMemberColor(m?.color_index)?.color ?? '#888888' }]}
                     />
                   ))}
                   {team.members.length > 6 && (
@@ -342,10 +358,33 @@ export default function TeamScreen() {
         />
       )}
 
+      {/* 팀 생성 완료 모달 */}
+      <Modal visible={!!teamCreatedInfo} transparent animationType="fade" onRequestClose={() => setTeamCreatedInfo(null)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center', padding: 32 }}>
+          <View style={{ backgroundColor: C.surface, borderRadius: 22, padding: 28, width: '100%', alignItems: 'center' }}>
+            <Text style={{ fontSize: 32, color: '#6c8fff', marginBottom: 12 }}>◈</Text>
+            <Text style={{ fontSize: 17, fontWeight: '700', color: C.text }}>팀이 만들어졌어요</Text>
+            <Text style={{ fontSize: 14, color: C.muted, marginTop: 4 }}>{teamCreatedInfo?.name}</Text>
+            <View style={{ backgroundColor: C.card, borderRadius: 12, padding: 14, marginTop: 16, width: '100%', alignItems: 'center' }}>
+              <Text style={{ fontSize: 11, color: C.dim, marginBottom: 6 }}>팀 코드</Text>
+              <Text style={{ fontSize: 24, fontWeight: '700', letterSpacing: 4, color: C.text }}>{teamCreatedInfo?.code}</Text>
+            </View>
+            <Text style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>코드를 멤버들에게 공유하세요</Text>
+            <TouchableOpacity
+              style={{ backgroundColor: C.text, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 32, marginTop: 20 }}
+              onPress={() => setTeamCreatedInfo(null)}
+              activeOpacity={0.7}
+            >
+              <Text style={{ color: C.bg, fontSize: 14, fontWeight: '600' }}>확인</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       {/* 코드로 팀 참여 모달 */}
       {showJoin && (
         <Modal visible transparent animationType="slide" onRequestClose={closeJoinModal}>
-          <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={closeJoinModal}>
+          <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => closeJoinModal()}>
             <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
               <TouchableOpacity activeOpacity={1}>
                 <View style={styles.modalSheet}>
@@ -356,7 +395,7 @@ export default function TeamScreen() {
                     <>
                       <View style={styles.modalTitleRow}>
                         <Text style={styles.modalTitle}>코드로 팀 참여</Text>
-                        <TouchableOpacity onPress={closeJoinModal} style={styles.modalCloseBtn}>
+                        <TouchableOpacity onPress={() => closeJoinModal()} style={styles.modalCloseBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                           <Text style={styles.modalCloseBtnText}>✕</Text>
                         </TouchableOpacity>
                       </View>
@@ -377,8 +416,10 @@ export default function TeamScreen() {
                       />
                       <TouchableOpacity
                         style={[styles.submitBtn, (joinCode.trim().length < 6 || joinSearching) && { opacity: 0.4 }]}
-                        onPress={handleFindTeam}
+                        onPress={() => handleFindTeam()}
                         disabled={joinCode.trim().length < 6 || joinSearching}
+                        activeOpacity={0.7}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       >
                         {joinSearching
                           ? <ActivityIndicator color={C.bg} />
@@ -395,12 +436,13 @@ export default function TeamScreen() {
                         <TouchableOpacity
                           onPress={() => setJoinStep('input')}
                           style={styles.modalBackBtn}
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                         >
                           <Text style={styles.modalBackBtnText}>‹</Text>
                         </TouchableOpacity>
                         <Text style={styles.modalTitle}>팀 확인</Text>
-                        <TouchableOpacity onPress={closeJoinModal} style={styles.modalCloseBtn}>
+                        <TouchableOpacity onPress={() => closeJoinModal()} style={styles.modalCloseBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                           <Text style={styles.modalCloseBtnText}>✕</Text>
                         </TouchableOpacity>
                       </View>
@@ -426,8 +468,10 @@ export default function TeamScreen() {
                           </Text>
                           <TouchableOpacity
                             style={[styles.submitBtn, joinSending && { opacity: 0.4 }]}
-                            onPress={handleSendJoinRequest}
+                            onPress={() => handleSendJoinRequest()}
                             disabled={joinSending}
+                            activeOpacity={0.7}
+                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                           >
                             {joinSending
                               ? <ActivityIndicator color={C.bg} />
@@ -462,11 +506,27 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   const [paletteDrops, setPaletteDrops] = useState([]);
   const [animDrop, setAnimDrop]       = useState(null);
   const [loading, setLoading]         = useState(true);
-  const [myColorIndex, setMyColorIndex] = useState(0);
+
+  // ── 설정 ─────────────────────────────────────────────
+  const [settings, setSettings] = useState({
+    paletteSize: 'medium', teamBlackAnimationOn: true, calStartSunday: true,
+  });
+
+  const loadSettings = useCallback(async () => {
+    try {
+      const raw = await AsyncStorage.getItem(STORAGE_KEYS.SETTINGS);
+      if (raw) setSettings(prev => ({ ...prev, ...JSON.parse(raw) }));
+    } catch (_) {}
+  }, []);
+
+  useFocusEffect(useCallback(() => { loadSettings(); }, [loadSettings]));
 
   // ── 날짜 ─────────────────────────────────────────────
   const [selectedDate, setSelectedDate] = useState(dateKey());
   const todayKey = useMemo(() => dateKey(), []);
+  // Realtime 클로저에서 최신 날짜를 참조하기 위한 ref
+  const selectedDateRef = useRef(selectedDate);
+  useEffect(() => { selectedDateRef.current = selectedDate; }, [selectedDate]);
 
   // ── BLACK 달성 ────────────────────────────────────────
   const [blackPhase, setBlackPhase]   = useState(null); // null | 'in' | 'text' | 'orb' | 'stamp'
@@ -476,12 +536,20 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   const prevIsBlack    = useRef(false);
   const blackShownDates = useRef(new Set());
 
+  // 토글 중복 실행 방지 (빠른 더블탭 시 낙관적 업데이트 중복 방지)
+  const pendingTodoIds = useRef(new Set());
+
+  // ── Flying Orb ───────────────────────────────────────
+  const [flyOrb, setFlyOrb]           = useState(null);
+
   // ── 스탬프 애니메이션 ──────────────────────────────────
   const [stampDate, setStampDate]     = useState(null);
-  const stampScale   = useRef(new Animated.Value(2.4)).current;
-  const stampOpacity = useRef(new Animated.Value(0)).current;
-  const rippleScale  = useRef(new Animated.Value(1)).current;
-  const rippleOpacity = useRef(new Animated.Value(0.6)).current;
+  const stampScale    = useRef(new Animated.Value(2.4)).current;
+  const stampOpacity  = useRef(new Animated.Value(0)).current;
+  const rippleScale   = useRef(new Animated.Value(1)).current;
+  const rippleOpacity = useRef(new Animated.Value(0)).current;
+  const rippleScale2  = useRef(new Animated.Value(1)).current;
+  const rippleOpacity2 = useRef(new Animated.Value(0)).current;
 
   // ── 캘린더 ───────────────────────────────────────────
   const [showCal, setShowCal]         = useState(false);
@@ -491,8 +559,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
     const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() };
   });
 
-  // ── Flying Orb ───────────────────────────────────────
-  const [flyOrb, setFlyOrb]           = useState(null);
+  const [viewingMember, setViewingMember] = useState(null);
 
   // ── 캘린더 셀 ref (FlyingOrb 좌표 계산용) ─────────────
   const targetCellRef = useRef(null);
@@ -530,9 +597,10 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   const channelRef = useRef(null);
 
   // ── 파생 값 ──────────────────────────────────────────
-  const members  = detail?.team_members ?? [];
-  const isOwner  = detail?.created_by === userId;
-  const myColor  = getMemberColor(myColorIndex);
+  const members       = detail?.team_members ?? [];
+  const isOwner       = detail?.created_by === userId;
+  const myColorIndex  = detail?.team_members?.find(m => m.user_id === userId)?.color_index ?? 0;
+  const myColor       = getMemberColor(myColorIndex) ?? { hue: 220, color: '#6c8fff' };
   const isToday  = selectedDate === todayKey;
   const doneCount  = todos.filter(t => t.done).length;
   const totalCount = todos.length;
@@ -571,8 +639,6 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
       ]);
       setDetail(teamDetail);
       setCategories(cats);
-      const me = teamDetail.team_members?.find(m => m.user_id === userId);
-      if (me) setMyColorIndex(me.color_index);
       // 방장이면 참여 요청도 로드
       if (teamDetail.created_by === userId) {
         fetchPendingRequests(team.id).then(setJoinRequests).catch(() => {});
@@ -608,7 +674,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
         event: '*', schema: 'public', table: 'team_palette_history',
         filter: `team_id=eq.${team.id}`,
       }, (payload) => {
-        if (payload.new?.date === selectedDate) {
+        // selectedDateRef로 최신 날짜 참조 (stale closure 방지)
+        if (payload.new?.date === selectedDateRef.current) {
           setPaletteDrops(payload.new.drops ?? []);
         }
       })
@@ -647,6 +714,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
    * ④ 실패 시 롤백
    */
   const handleToggleTeamTodo = async (todo) => {
+    if (pendingTodoIds.current.has(todo.id)) return;
+    pendingTodoIds.current.add(todo.id);
     const willDone = !todo.done;
     const dk = selectedDate;
 
@@ -720,6 +789,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
       setPaletteDrops(prevDrops);
       setAnimDrop(null);
       Alert.alert('오류', '업데이트에 실패했어요');
+    } finally {
+      pendingTodoIds.current.delete(todo.id);
     }
   };
 
@@ -740,7 +811,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
     const assigneeId = assignee.user_id !== userId ? assignee.user_id : null;
 
     // 낙관적 추가
-    const tempId  = `temp_${Date.now()}`;
+    const tempId  = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const newTodo = {
       id: tempId,
       team_id: team.id,
@@ -799,12 +870,14 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   const handleAnimDone = useCallback(() => {
     const wasLast = animDrop?.isLast;
     setAnimDrop(null);
+    if (!wasLast) return;
+    if (!settings.teamBlackAnimationOn) return;
     const key = `${team.id}:${selectedDate}:${totalCount}`;
-    if (wasLast && !blackShownDates.current.has(key)) {
+    if (!blackShownDates.current.has(key)) {
       blackShownDates.current.add(key);
       setBlackPhase('in');
     }
-  }, [animDrop, selectedDate, totalCount, team.id]);
+  }, [animDrop, selectedDate, totalCount, team.id, settings.teamBlackAnimationOn]);
 
   // ── 멤버 초대 ─────────────────────────────────────────
   const handleInviteSearch = async (query) => {
@@ -819,16 +892,15 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   const handleInviteUser = async (targetUser) => {
     const alreadyMember = detail?.team_members?.some(m => m.user_id === targetUser.id);
     if (alreadyMember) { Alert.alert('', '이미 팀원이에요'); return; }
-    const alreadyPending = joinRequests.some(r => r.requester_id === targetUser.id);
-    if (alreadyPending) { Alert.alert('', '이미 요청이 전송됐어요'); return; }
     setInviting(true);
     try {
-      await createJoinRequest(team.id, targetUser.id);
-      setJoinRequests(prev => [...prev, { id: Date.now().toString(), team_id: team.id, requester_id: targetUser.id, status: 'pending', users: targetUser }]);
-      Alert.alert('초대 전송', `${targetUser.name}님께 초대 요청을 보냈어요.\n방장이 수락하면 팀에 참여돼요.`);
+      // 방장이 초대 → 바로 팀원 추가 (참여 요청 불필요)
+      await addTeamMember(team.id, targetUser.id);
       setInviteQuery('');
       setInviteResults([]);
       setShowInvite(false);
+      loadAll(); // 팀 상세 새로고침
+      Alert.alert('초대 완료', `${targetUser.name}님이 팀에 추가됐어요.`);
     } catch (e) {
       Alert.alert('초대 실패', e.message);
     } finally {
@@ -880,7 +952,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
         const map = {};
         (data ?? []).forEach(row => { map[row.date] = { drops: row.drops ?? [], total: row.total ?? 0 }; });
         setMonthHistory(map);
-      });
+      })
+      .catch(() => {});
   }, [viewMonth, detail]);
 
   // 현재 날짜의 팔레트 변경 시 monthHistory 동기화
@@ -895,7 +968,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   const calYear     = viewMonth.y;
   const calMonth    = viewMonth.m;
   const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
-  const firstDow    = new Date(calYear, calMonth, 1).getDay(); // 일요일=0
+  const rawDow1  = new Date(calYear, calMonth, 1).getDay();
+  const firstDow = settings.calStartSunday ? rawDow1 : (rawDow1 + 6) % 7;
   const monthName   = new Date(calYear, calMonth, 1).toLocaleString('ko-KR', { month: 'long' });
 
   // ── 캘린더 열기 / 닫기 ───────────────────────────────
@@ -921,19 +995,22 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   };
 
   // ── getTargetCellPos — measureInWindow 없이 수학으로 셀 중심 계산 ──
-  // index.js와 동일한 로직 (calSheet paddingTop=20, paddingHorizontal=18)
   const getTargetCellPos = (dateStr) => {
     const [y, m, d] = dateStr.split('-').map(Number);
-    const firstDay  = new Date(y, m - 1, 1).getDay();
+    // calStartSunday 설정 반영 (캘린더 렌더링의 firstDow와 동일한 계산)
+    const rawDow1  = new Date(y, m - 1, 1).getDay();
+    const firstDay = settings.calStartSunday ? rawDow1 : (rawDow1 + 6) % 7;
     const cellIndex = firstDay + d - 1;
     const col = cellIndex % 7;
     const row = Math.floor(cellIndex / 7);
 
-    const cellW = (SW - 36) / 7;  // paddingHorizontal 18×2
-    const cellH = 50;              // paddingVertical(6) + circle(30) + gap(2) + dayNum(12)
+    const cellW = (SW - 36) / 7;  // paddingHorizontal 18×2 = 36
+    const cellH = 50;              // paddingVertical(3*2) + circle(30) + gap(2) + dayNum(~12)
     const ROW_GAP = 3;
 
-    const sheetTop = insets.top + 20;
+    // calSheet paddingTop: insets.top + 16 (inline style)
+    const sheetTop = insets.top + 16;
+    // calHeader(34 + marginBottom 16) + calDowRow(~14 + marginBottom 6) = 70
     const headerH  = 70;
 
     const cellX = 18 + col * cellW + cellW / 2;
@@ -959,26 +1036,47 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   // 'text' — 200ms 페이드인 → 700ms 표시 → 200ms 페이드아웃 → 'orb'
   useEffect(() => {
     if (blackPhase !== 'text') return;
+    let cancelled = false;
     blackTextAnim.setValue(0);
     Animated.timing(blackTextAnim, {
       toValue: 1, duration: 200, useNativeDriver: true,
     }).start(() => {
+      if (cancelled) return;
       blackTimer.current = setTimeout(() => {
+        if (cancelled) return;
         Animated.timing(blackTextAnim, {
           toValue: 0, duration: 200, useNativeDriver: true,
         }).start(({ finished }) => {
-          if (finished) setBlackPhase('orb');
+          if (finished && !cancelled) setBlackPhase('orb');
         });
       }, 700);
     });
-    return () => clearTimeout(blackTimer.current);
+    return () => {
+      cancelled = true;
+      clearTimeout(blackTimer.current);
+    };
   }, [blackPhase]);
 
-  // 'orb' — 수학 계산으로 셀 중심 좌표 결정
+  // 'orb' — measureInWindow로 선택 셀 중심 좌표 결정 (실제 레이아웃 기반)
   useEffect(() => {
     if (blackPhase !== 'orb') return;
-    const pos = getTargetCellPos(selectedDate);
-    setFlyOrb({ toX: pos.x, toY: pos.y });
+    const measure = () => {
+      if (targetCellRef.current) {
+        targetCellRef.current.measureInWindow((x, y, width, height) => {
+          if (width > 0 && height > 0) {
+            setFlyOrb({ toX: x + width / 2, toY: y + height / 2 });
+          } else {
+            const pos = getTargetCellPos(selectedDate);
+            setFlyOrb({ toX: pos.x, toY: pos.y });
+          }
+        });
+      } else {
+        const pos = getTargetCellPos(selectedDate);
+        setFlyOrb({ toX: pos.x, toY: pos.y });
+      }
+    };
+    const t = setTimeout(measure, 80);
+    return () => clearTimeout(t);
   }, [blackPhase]);
 
   // 'stamp' — 스탬프 리플 + 오버레이 페이드아웃
@@ -994,15 +1092,33 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
     stampScale.setValue(2.4);
     stampOpacity.setValue(0);
     rippleScale.setValue(1);
-    rippleOpacity.setValue(0.6);
+    rippleOpacity.setValue(0);
+    rippleScale2.setValue(1);
+    rippleOpacity2.setValue(0);
     Animated.parallel([
+      // 스탬프 도장 애니메이션
       Animated.timing(stampScale,   { toValue: 1, duration: 300, useNativeDriver: true }),
       Animated.timing(stampOpacity, { toValue: 1, duration: 300, useNativeDriver: true }),
+      // 1차 리플 — 즉시 시작, 넓게 퍼짐
       Animated.sequence([
-        Animated.delay(80),
+        Animated.delay(40),
         Animated.parallel([
-          Animated.timing(rippleScale,   { toValue: 2.2, duration: 300, useNativeDriver: true }),
-          Animated.timing(rippleOpacity, { toValue: 0,   duration: 300, useNativeDriver: true }),
+          Animated.timing(rippleScale,   { toValue: 5.5, duration: 550, useNativeDriver: true }),
+          Animated.sequence([
+            Animated.timing(rippleOpacity, { toValue: 0.85, duration: 60,  useNativeDriver: true }),
+            Animated.timing(rippleOpacity, { toValue: 0,    duration: 490, useNativeDriver: true }),
+          ]),
+        ]),
+      ]),
+      // 2차 리플 — 약간 늦게, 더 크게
+      Animated.sequence([
+        Animated.delay(200),
+        Animated.parallel([
+          Animated.timing(rippleScale2,   { toValue: 4.0, duration: 480, useNativeDriver: true }),
+          Animated.sequence([
+            Animated.timing(rippleOpacity2, { toValue: 0.55, duration: 60,  useNativeDriver: true }),
+            Animated.timing(rippleOpacity2, { toValue: 0,    duration: 420, useNativeDriver: true }),
+          ]),
         ]),
       ]),
     ]).start(() => {
@@ -1054,7 +1170,9 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   const renderCalendarView = () => {
     if (!showCal && !calClosing) return null;
 
-    const DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+    const DOW_LABELS = settings.calStartSunday
+      ? ['일', '월', '화', '수', '목', '금', '토']
+      : ['월', '화', '수', '목', '금', '토', '일'];
     const emptyCells = Array.from({ length: firstDow });
     const dayCells   = Array.from({ length: daysInMonth }, (_, i) => i + 1);
 
@@ -1064,16 +1182,16 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
         pointerEvents={showCal ? 'auto' : 'none'}
       >
         <TouchableOpacity style={calStyles.calOverlay} activeOpacity={1} onPress={() => closeCalendar()}>
-          <Animated.View style={[calStyles.calSheet, { transform: [{ translateY: calTransY }] }]}>
+          <Animated.View style={[calStyles.calSheet, { transform: [{ translateY: calTransY }], paddingTop: insets.top + 16 }]}>
             <TouchableOpacity activeOpacity={1} onPress={() => {}}>
 
               {/* 월 이동 헤더 */}
               <View style={calStyles.calHeader}>
-                <TouchableOpacity onPress={() => goMonth(-1)} style={calStyles.calNavBtn}>
+                <TouchableOpacity onPress={() => goMonth(-1)} style={calStyles.calNavBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                   <Text style={calStyles.calNavText}>‹</Text>
                 </TouchableOpacity>
                 <Text style={calStyles.calTitle}>{calYear}년 {monthName}</Text>
-                <TouchableOpacity onPress={() => goMonth(1)} style={calStyles.calNavBtn}>
+                <TouchableOpacity onPress={() => goMonth(1)} style={calStyles.calNavBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                   <Text style={calStyles.calNavText}>›</Text>
                 </TouchableOpacity>
               </View>
@@ -1126,6 +1244,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                       onPress={() => { setSelectedDate(dk); closeCalendar(); }}
                       style={[calStyles.calCell, isSel && calStyles.calCellSel, cellBorder]}
                       activeOpacity={0.7}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     >
                       <Animated.View
                         style={[
@@ -1146,10 +1265,17 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                         )}
                         {isDone && hasDrops && <View style={calStyles.calDoneRing} />}
                         {isStamp && (
-                          <Animated.View style={[
-                            calStyles.calRipple,
-                            { transform: [{ scale: rippleScale }], opacity: rippleOpacity },
-                          ]} />
+                          <>
+                            <Animated.View style={[
+                              calStyles.calRipple,
+                              { transform: [{ scale: rippleScale }], opacity: rippleOpacity },
+                            ]} />
+                            <Animated.View style={[
+                              calStyles.calRipple,
+                              calStyles.calRipple2,
+                              { transform: [{ scale: rippleScale2 }], opacity: rippleOpacity2 },
+                            ]} />
+                          </>
                         )}
                       </Animated.View>
 
@@ -1215,7 +1341,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   // 6단계 ▼ 파생 값 + 카테고리 액션 + 렌더
   // ══════════════════════════════════════════════════════
 
-  const PALETTE_SIZE = 160;
+  const PALETTE_SIZE = { small: 120, medium: 160, large: 200 }[settings.paletteSize] ?? 160;
 
   const todosByCat = useMemo(() => {
     const map = {};
@@ -1291,8 +1417,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
       return members.find(m => m.user_id === todo.author_id);
     })();
     const assigneeColor = targetMember
-      ? getMemberColor(targetMember.color_index).color
-      : myColor.color;
+      ? getMemberColor(targetMember?.color_index)?.color ?? '#888888'
+      : myColor?.color ?? '#888888';
 
     // 담당자 이름 (본인이 아닐 때만 표시)
     const assigneeName = targetMember && targetMember.user_id !== userId
@@ -1319,6 +1445,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
             isDone && { borderColor: assigneeColor, backgroundColor: assigneeColor },
           ]}
           activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           {isDone && <Text style={detailStyles.checkmark}>✓</Text>}
         </TouchableOpacity>
@@ -1331,16 +1458,11 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
           {todo.text}
         </Text>
 
-        {/* 담당자 이니셜 뱃지 (본인이 아닐 때) */}
-        {assigneeName && (
-          <View style={[detailStyles.assigneeBadge, {
-            backgroundColor: assigneeColor + '25',
-            borderColor: assigneeColor,
-          }]}>
-            <Text style={[detailStyles.assigneeBadgeText, { color: assigneeColor }]}>
-              {assigneeName[0]}
-            </Text>
-          </View>
+        {/* 담당자 아바타 뱃지 (본인이 아닐 때) */}
+        {targetMember && targetMember.user_id !== userId && (
+          <TouchableOpacity onPress={() => setViewingMember(targetMember)} activeOpacity={0.8} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <MemberAvatar member={targetMember} size={22} />
+          </TouchableOpacity>
         )}
 
         {/* 삭제 버튼 */}
@@ -1348,7 +1470,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
           <TouchableOpacity
             onPress={() => handleDeleteTeamTodo(todo.id)}
             style={detailStyles.deleteBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
             <Text style={detailStyles.deleteBtnText}>✕</Text>
           </TouchableOpacity>
@@ -1386,6 +1509,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
               setTimeout(() => inputRef.current?.focus(), 50);
             }}
             style={detailStyles.catAddBtn}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
             <Text style={detailStyles.catAddBtnText}>+</Text>
           </TouchableOpacity>
@@ -1415,6 +1540,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                     borderColor: myColor.color,
                   },
                 ]}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <View style={[detailStyles.assigneeChipDot, { backgroundColor: myColor.color }]} />
                 <Text style={[detailStyles.assigneeChipText, !selectedAssignee && { color: myColor.color }]}>
@@ -1426,7 +1553,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
               {members
                 .filter(m => m.user_id !== userId)
                 .map(m => {
-                  const mc = getMemberColor(m.color_index);
+                  const mc = getMemberColor(m?.color_index) ?? { hue: 0, color: '#888888' };
                   const isSelected = selectedAssignee?.user_id === m.user_id;
                   return (
                     <TouchableOpacity
@@ -1439,6 +1566,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                           borderColor: mc.color,
                         },
                       ]}
+                      activeOpacity={0.7}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     >
                       <View style={[detailStyles.assigneeChipDot, { backgroundColor: mc.color }]} />
                       <Text style={[detailStyles.assigneeChipText, isSelected && { color: mc.color }]}>
@@ -1466,6 +1595,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
               <TouchableOpacity
                 onPress={() => handleAddTeamTodo(cat.id)}
                 style={[detailStyles.addTodoSubmit, { backgroundColor: myColor.color }]}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <Text style={detailStyles.addTodoSubmitText}>↵</Text>
               </TouchableOpacity>
@@ -1487,14 +1618,14 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
 
   // ── 메인 렌더 ─────────────────────────────────────────
   return (
-    <View style={[styles.root, { paddingTop: insets.top }]}>
+    <View style={[styles.root, { paddingTop: insets.top + 8 }]}>
 
       {/* ══ 상단 고정 영역 ══ */}
       <View style={detailStyles.topArea}>
 
         {/* 헤더: 뒤로 + 팀 이름 + 캘린더/카테고리 + 메뉴 */}
         <View style={detailStyles.headerRow}>
-          <TouchableOpacity onPress={onBack} style={detailStyles.backBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+          <TouchableOpacity onPress={() => onBack()} style={detailStyles.backBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={detailStyles.backBtnText}>‹</Text>
           </TouchableOpacity>
 
@@ -1506,13 +1637,13 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
           </View>
 
           <View style={detailStyles.headerBtns}>
-            <TouchableOpacity onPress={() => setShowCal(true)} style={detailStyles.headerPill}>
+            <TouchableOpacity onPress={() => setShowCal(true)} style={detailStyles.headerPill} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={detailStyles.headerPillText}>캘린더</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setShowCatModal(true)} style={detailStyles.headerPill}>
+            <TouchableOpacity onPress={() => setShowCatModal(true)} style={detailStyles.headerPill} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={detailStyles.headerPillText}>카테고리</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setShowMenu(v => !v)} style={detailStyles.menuBtn}>
+            <TouchableOpacity onPress={() => setShowMenu(v => !v)} style={detailStyles.menuBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={detailStyles.menuBtnText}>⋯</Text>
             </TouchableOpacity>
           </View>
@@ -1520,24 +1651,12 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
 
         {/* 멤버 아바타 행 */}
         <View style={detailStyles.memberRow}>
-          {members.map(m => {
-            const mc = getMemberColor(m.color_index);
-            const name = m.users?.name ?? '?';
-            return (
-              <View
-                key={m.user_id}
-                style={[detailStyles.memberAvatar, {
-                  backgroundColor: mc.color + '25',
-                  borderColor: mc.color,
-                }]}
-              >
-                <Text style={[detailStyles.memberAvatarText, { color: mc.color }]}>
-                  {name[0]}
-                </Text>
-              </View>
-            );
-          })}
-          <TouchableOpacity onPress={() => setShowInvite(true)} style={detailStyles.inviteBtn}>
+          {members.map(m => (
+            <TouchableOpacity key={m.user_id} onPress={() => setViewingMember(m)} activeOpacity={0.8} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <MemberAvatar member={m} size={28} />
+            </TouchableOpacity>
+          ))}
+          <TouchableOpacity onPress={() => setShowInvite(true)} style={detailStyles.inviteBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={detailStyles.inviteBtnText}>+ 초대</Text>
           </TouchableOpacity>
         </View>
@@ -1547,7 +1666,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
           <View style={detailStyles.dateNav}>
             <Text style={detailStyles.dateNavLabel}>team</Text>
             <View style={detailStyles.dateNavInner}>
-              <TouchableOpacity onPress={() => goDay(-1)} style={detailStyles.navBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <TouchableOpacity onPress={() => goDay(-1)} style={detailStyles.navBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                 <Text style={detailStyles.navArrow}>◀</Text>
               </TouchableOpacity>
               <Text style={detailStyles.dateText} numberOfLines={1}>
@@ -1555,7 +1674,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                   ? '오늘'
                   : selDateObj.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' })}
               </Text>
-              <TouchableOpacity onPress={() => goDay(1)} style={detailStyles.navBtn} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <TouchableOpacity onPress={() => goDay(1)} style={detailStyles.navBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                 <Text style={detailStyles.navArrow}>▶</Text>
               </TouchableOpacity>
             </View>
@@ -1593,12 +1712,16 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                 <TouchableOpacity
                   onPress={() => handleAcceptRequest(req)}
                   style={detailStyles.acceptBtn}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 >
                   <Text style={detailStyles.acceptBtnText}>수락</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
                   onPress={() => handleRejectRequest(req)}
                   style={detailStyles.rejectBtn}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 >
                   <Text style={detailStyles.rejectBtnText}>거절</Text>
                 </TouchableOpacity>
@@ -1611,14 +1734,14 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
       {/* ══ 할일 목록 스크롤 ══ */}
       <ScrollView
         style={detailStyles.scroll}
-        contentContainerStyle={detailStyles.scrollContent}
+        contentContainerStyle={[detailStyles.scrollContent, { paddingBottom: insets.bottom + 16 }]}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
         {categories.length === 0 ? (
           <View style={detailStyles.emptyWrap}>
             <Text style={detailStyles.emptyTitle}>카테고리를 만들어 할 일을 분류해보세요</Text>
-            <TouchableOpacity onPress={() => setShowCatModal(true)} style={detailStyles.emptyBtn}>
+            <TouchableOpacity onPress={() => setShowCatModal(true)} style={detailStyles.emptyBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={detailStyles.emptyBtnText}>+ 카테고리 추가</Text>
             </TouchableOpacity>
           </View>
@@ -1642,7 +1765,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                 <View style={styles.modalHandle} />
                 <View style={styles.modalTitleRow}>
                   <Text style={styles.modalTitle}>카테고리 관리</Text>
-                  <TouchableOpacity onPress={() => setShowCatModal(false)} style={styles.modalCloseBtn}>
+                  <TouchableOpacity onPress={() => setShowCatModal(false)} style={styles.modalCloseBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                     <Text style={styles.modalCloseBtnText}>✕</Text>
                   </TouchableOpacity>
                 </View>
@@ -1663,7 +1786,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                               { text: '삭제', style: 'destructive', onPress: () => handleDeleteCategory(cat.id) },
                             ],
                           )}
-                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                         >
                           <Text style={detailStyles.modalCatDelText}>✕</Text>
                         </TouchableOpacity>
@@ -1683,6 +1807,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                         { backgroundColor: color },
                         newCatColor === color && detailStyles.catColorOptionActive,
                       ]}
+                      activeOpacity={0.7}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     />
                   ))}
                 </View>
@@ -1699,7 +1825,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                     autoFocus
                     returnKeyType="done"
                   />
-                  <TouchableOpacity onPress={handleAddCategory} style={detailStyles.catAddModalBtn}>
+                  <TouchableOpacity onPress={() => handleAddCategory()} style={detailStyles.catAddModalBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                     <Text style={detailStyles.catAddModalBtnText}>+</Text>
                   </TouchableOpacity>
                 </View>
@@ -1725,6 +1851,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                 Alert.alert('팀 코드', `${code}\n멤버들에게 이 코드를 공유하세요.`);
               }}
               style={detailStyles.menuItem}
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <Text style={detailStyles.menuItemText}>팀 코드 보기</Text>
             </TouchableOpacity>
@@ -1732,6 +1860,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
               <TouchableOpacity
                 onPress={() => { setShowMenu(false); setShowEditTeam(true); }}
                 style={detailStyles.menuItem}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <Text style={detailStyles.menuItemText}>팀 정보 수정</Text>
               </TouchableOpacity>
@@ -1749,6 +1879,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                   ]);
                 }}
                 style={detailStyles.menuItem}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <Text style={[detailStyles.menuItemText, { color: '#ff9f43' }]}>팀 나가기</Text>
               </TouchableOpacity>
@@ -1766,6 +1898,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                   ]);
                 }}
                 style={[detailStyles.menuItem, { borderBottomWidth: 0 }]}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <Text style={[detailStyles.menuItemText, { color: '#ff6b6b' }]}>팀 삭제</Text>
               </TouchableOpacity>
@@ -1784,7 +1918,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                   <View style={styles.modalHandle} />
                   <View style={styles.modalTitleRow}>
                     <Text style={styles.modalTitle}>팀 정보 수정</Text>
-                    <TouchableOpacity onPress={() => setShowEditTeam(false)} style={styles.modalCloseBtn}>
+                    <TouchableOpacity onPress={() => setShowEditTeam(false)} style={styles.modalCloseBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                       <Text style={styles.modalCloseBtnText}>✕</Text>
                     </TouchableOpacity>
                   </View>
@@ -1806,6 +1940,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                   <TouchableOpacity
                     style={[styles.submitBtn, !editName.trim() && { opacity: 0.4 }]}
                     disabled={!editName.trim()}
+                    activeOpacity={0.7}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     onPress={async () => {
                       try {
                         await updateTeam(team.id, editName.trim(), editDesc.trim());
@@ -1839,7 +1975,7 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                   <View style={styles.modalHandle} />
                   <View style={styles.modalTitleRow}>
                     <Text style={styles.modalTitle}>멤버 초대</Text>
-                    <TouchableOpacity onPress={() => { setShowInvite(false); setInviteQuery(''); setInviteResults([]); }} style={styles.modalCloseBtn}>
+                    <TouchableOpacity onPress={() => { setShowInvite(false); setInviteQuery(''); setInviteResults([]); }} style={styles.modalCloseBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                       <Text style={styles.modalCloseBtnText}>✕</Text>
                     </TouchableOpacity>
                   </View>
@@ -1863,6 +1999,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                             style={[detailStyles.inviteResultRow, alreadyMember && { opacity: 0.4 }]}
                             onPress={() => !alreadyMember && handleInviteUser(u)}
                             disabled={alreadyMember || inviting}
+                            activeOpacity={0.7}
+                            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                           >
                             <View style={{ flex: 1 }}>
                               <Text style={{ fontSize: 14, color: C.text }}>{u.name}</Text>
@@ -1882,9 +2020,9 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
                   </Text>
                   {detail?.team_members?.map(m => (
                     <View key={m.user_id} style={detailStyles.memberListRow}>
-                      <View style={[detailStyles.memberAvatar, { backgroundColor: getMemberColor(m.color_index).color }]}>
-                        <Text style={detailStyles.memberAvatarText}>{m.users?.name?.[0]?.toUpperCase() ?? '?'}</Text>
-                      </View>
+                      <TouchableOpacity onPress={() => setViewingMember(m)} activeOpacity={0.8}>
+                        <MemberAvatar member={m} size={28} />
+                      </TouchableOpacity>
                       <View style={{ flex: 1 }}>
                         <Text style={{ fontSize: 13, color: C.text }}>{m.users?.name}</Text>
                         <Text style={{ fontSize: 11, color: C.muted }}>@{m.users?.handle}</Text>
@@ -1908,6 +2046,35 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
 
       {/* BLACK 오버레이 + FlyingOrb */}
       {renderBlackModal()}
+
+      {/* 멤버 프로필 크게 보기 */}
+      <Modal visible={!!viewingMember} transparent animationType="fade" onRequestClose={() => setViewingMember(null)}>
+        <Pressable
+          style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', alignItems: 'center', justifyContent: 'center' }}
+          onPress={() => setViewingMember(null)}
+        >
+          <View style={{ alignItems: 'center', gap: 12 }}>
+            <View style={{
+              width: 100, height: 100, borderRadius: 50, overflow: 'hidden',
+              backgroundColor: getMemberColor(viewingMember?.color_index)?.color ?? '#888888',
+              alignItems: 'center', justifyContent: 'center',
+            }}>
+              {viewingMember?.users?.avatar_url
+                ? <Image source={{ uri: viewingMember.users.avatar_url }} style={{ width: 100, height: 100 }} />
+                : <Text style={{ color: '#fff', fontSize: 40, fontWeight: '700', lineHeight: 100 }}>
+                    {(viewingMember?.users?.name || viewingMember?.users?.handle || '?')[0].toUpperCase()}
+                  </Text>
+              }
+            </View>
+            <Text style={{ color: '#f0ece6', fontSize: 16, fontWeight: '600' }}>
+              {viewingMember?.users?.name}
+            </Text>
+            <Text style={{ color: '#888', fontSize: 13 }}>
+              @{viewingMember?.users?.handle}
+            </Text>
+          </View>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -1933,14 +2100,14 @@ function CreateTeamModal({ onClose, onCreate }) {
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-      <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={onClose}>
+      <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => onClose()}>
         <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
           <TouchableOpacity activeOpacity={1}>
             <View style={styles.modalSheet}>
               <View style={styles.modalHandle} />
               <View style={styles.modalTitleRow}>
                 <Text style={styles.modalTitle}>팀 만들기</Text>
-                <TouchableOpacity onPress={onClose} style={styles.modalCloseBtn}>
+                <TouchableOpacity onPress={() => onClose()} style={styles.modalCloseBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                   <Text style={styles.modalCloseBtnText}>✕</Text>
                 </TouchableOpacity>
               </View>
@@ -1964,8 +2131,10 @@ function CreateTeamModal({ onClose, onCreate }) {
               />
               <TouchableOpacity
                 style={[styles.submitBtn, (!name.trim() || loading) && { opacity: 0.4 }]}
-                onPress={handleSubmit}
+                onPress={() => handleSubmit()}
                 disabled={!name.trim() || loading}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 {loading
                   ? <ActivityIndicator color={C.bg} />
@@ -2001,7 +2170,6 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     justifyContent: 'space-between',
     paddingHorizontal: 18,
-    paddingTop: 24,
     paddingBottom: 0,
   },
   listHeaderLabel: {
@@ -2331,7 +2499,6 @@ const detailStyles = StyleSheet.create({
   topArea: {
     flexShrink: 0,
     paddingHorizontal: 18,
-    paddingTop: 16,
   },
   headerRow: {
     flexDirection: 'row',
@@ -2340,8 +2507,8 @@ const detailStyles = StyleSheet.create({
     marginBottom: 12,
   },
   backBtn: {
-    width: 32,
-    height: 32,
+    minWidth: 44,
+    minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -2371,7 +2538,7 @@ const detailStyles = StyleSheet.create({
     gap: 6,
   },
   headerPill: {
-    height: 28,
+    minHeight: 44,
     paddingHorizontal: 10,
     borderRadius: R.full,
     backgroundColor: C.surface,
@@ -2385,9 +2552,9 @@ const detailStyles = StyleSheet.create({
     color: C.muted,
   },
   menuBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    minWidth: 44,
+    minHeight: 44,
+    borderRadius: 22,
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.border,
@@ -2485,8 +2652,8 @@ const detailStyles = StyleSheet.create({
     gap: 4,
   },
   navBtn: {
-    width: 20,
-    height: 20,
+    minWidth: 44,
+    minHeight: 44,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -2673,12 +2840,9 @@ const detailStyles = StyleSheet.create({
     color: C.dim,
   },
   catAddBtn: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.border2,
+    minWidth: 44,
+    minHeight: 44,
+    borderRadius: 22,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -2915,7 +3079,6 @@ const calStyles = StyleSheet.create({
     backgroundColor: C.surface,
     borderBottomLeftRadius: 28,
     borderBottomRightRadius: 28,
-    paddingTop: 20,
     paddingHorizontal: 18,
     paddingBottom: 28,
   },
@@ -3012,8 +3175,12 @@ const calStyles = StyleSheet.create({
   },
   calRipple: {
     position: 'absolute',
-    top: -4, left: -4, right: -4, bottom: -4,
-    borderRadius: 19,
+    top: 0, left: 0, right: 0, bottom: 0,
+    borderRadius: 15,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.9)',
+  },
+  calRipple2: {
     borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.6)',
   },

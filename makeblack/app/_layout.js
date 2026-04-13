@@ -4,13 +4,28 @@ import { Stack, router } from 'expo-router';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '../lib/supabase';
+import { STORAGE_KEYS } from '../constants/theme';
 
-const SETTINGS_KEY = '@makeblack_settings';
-const PIN_KEY      = '@makeblack_pin';
+const SETTINGS_KEY   = STORAGE_KEYS.SETTINGS;
+const PIN_KEY        = STORAGE_KEYS.PIN;
+const ONBOARDING_KEY = STORAGE_KEYS.ONBOARDING;
+
+// onboarding.js에서 호출해 _layout의 state를 직접 업데이트
+let _markOnboardingDone = null;
+export function markOnboardingDone() {
+  _markOnboardingDone?.();
+}
 
 export default function RootLayout() {
-  const [session,     setSession]     = useState(undefined);
-  const [initialized, setInitialized] = useState(false);
+  const [session,        setSession]        = useState(undefined);
+  const [initialized,    setInitialized]    = useState(false);
+  const [onboardingDone, setOnboardingDone] = useState(null); // null = 아직 로딩중
+
+  // 모듈 레벨 함수가 이 컴포넌트의 setter를 참조하게 연결
+  useEffect(() => {
+    _markOnboardingDone = () => setOnboardingDone(true);
+    return () => { _markOnboardingDone = null; };
+  }, []);
 
   // ── PIN 잠금 ──────────────────────────────────────
   const [pinLocked,  setPinLocked]  = useState(false);
@@ -32,12 +47,13 @@ export default function RootLayout() {
       }
     });
 
-    // 앱 시작 시 PIN 잠금 확인
+    // 앱 시작 시 PIN 잠금 + 온보딩 확인
     (async () => {
       try {
-        const [raw, savedPin] = await Promise.all([
+        const [raw, savedPin, obDone] = await Promise.all([
           AsyncStorage.getItem(SETTINGS_KEY),
           AsyncStorage.getItem(PIN_KEY),
+          AsyncStorage.getItem(ONBOARDING_KEY),
         ]);
         if (raw && savedPin) {
           const s = JSON.parse(raw);
@@ -46,29 +62,35 @@ export default function RootLayout() {
             setPinLocked(true);
           }
         }
-      } catch (e) {}
+        setOnboardingDone(!!obDone);
+      } catch (e) {
+        setOnboardingDone(false);
+      }
     })();
 
     return () => subscription.unsubscribe();
   }, []);
 
-  // 세션 상태 변경 시 라우팅
+  // 세션 상태 변경 시 라우팅 (세션 + 온보딩 상태 둘 다 확인된 후에만)
   useEffect(() => {
-    if (!initialized) return;
-    if (session) {
+    if (!initialized || onboardingDone === null) return;
+    if (!onboardingDone) {
+      router.replace('/onboarding');
+    } else if (session) {
       router.replace('/(tabs)');
     } else {
       router.replace('/(auth)/login');
     }
-  }, [session, initialized]);
+  }, [session, initialized, onboardingDone]);
 
-  if (!initialized) return null;
+  if (!initialized || onboardingDone === null) return null;
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="(auth)" />
+        <Stack.Screen name="onboarding" />
       </Stack>
 
       {/* ── PIN 잠금 게이트 ── */}

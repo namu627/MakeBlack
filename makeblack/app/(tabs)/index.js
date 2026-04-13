@@ -11,10 +11,12 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useFocusEffect } from 'expo-router';
 import {
   View, Text, ScrollView, TouchableOpacity, TextInput,
   StyleSheet, Alert, Animated, Dimensions, Platform,
-  Modal, FlatList, KeyboardAvoidingView, Pressable,
+  Modal, KeyboardAvoidingView, PanResponder,
 } from 'react-native';
 import DraggableFlatList, { ScaleDecorator } from 'react-native-draggable-flatlist';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -31,7 +33,7 @@ import {
 } from '../../lib/todoService';
 import PaletteCanvas from '../../components/PaletteCanvas';
 import FlyingOrb from '../../components/FlyingOrb';
-import { THEMES, radius, CAT_COLORS } from '../../constants/theme';
+import { THEMES, radius, CAT_COLORS, STORAGE_KEYS } from '../../constants/theme';
 
 const { width: SW, height: SH } = Dimensions.get('window');
 
@@ -68,6 +70,11 @@ function catColorToDrop(catColor, fallbackHue = 200) {
   return { hue: fallbackHue, rgb, color: `hsl(${Math.round(fallbackHue)},82%,54%)` };
 }
 
+const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
+const DEFAULT_SETTINGS = {
+  paletteSize: 'medium', blackAnimationOn: true, calStartSunday: true,
+};
+
 // ── 팔레트 크기 계산 ───────────────────────────────────
 function getPaletteSize(sizeKey) {
   if (sizeKey === 'small') return Math.min(SW * 0.38, 140);
@@ -89,10 +96,23 @@ export default function HomeScreen() {
   // ── 날짜 ────────────────────────────────────────────
   const [todayKey_state, setTodayKey_state] = useState(getTodayKey());
   const [selectedDate, setSelectedDate]     = useState(getTodayKey());
+  const selectedDateRef = useRef(selectedDate);
   const [viewMonth, setViewMonth]           = useState(() => {
     const d = new Date();
     return { y: d.getFullYear(), m: d.getMonth() };
   });
+
+  // ── 설정 ──────────────────────────────────────────
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+
+  const loadSettings = useCallback(async () => {
+    try {
+      const raw = await AsyncStorage.getItem(SETTINGS_KEY);
+      if (raw) setSettings(prev => ({ ...prev, ...JSON.parse(raw) }));
+    } catch (_) {}
+  }, []);
+
+  useFocusEffect(useCallback(() => { loadSettings(); }, [loadSettings]));
 
   // ── 데이터 ──────────────────────────────────────────
   const [categories, setCategories]       = useState([]);
@@ -128,22 +148,52 @@ export default function HomeScreen() {
   // 캘린더 셀 ref — isSel 표시용 (측정에는 미사용)
   const targetCellRef = useRef(null);
 
+  const calPanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gs) =>
+        Math.abs(gs.dx) > 10 && Math.abs(gs.dx) > Math.abs(gs.dy),
+      onPanResponderRelease: (_, gs) => {
+        if (gs.dx < -50) goMonth(1);
+        else if (gs.dx > 50) goMonth(-1);
+      },
+    })
+  ).current;
+
+  const palettePanResponder = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onMoveShouldSetPanResponder: (_, gs) =>
+        Math.abs(gs.dx) > 10 && Math.abs(gs.dx) > Math.abs(gs.dy),
+      onPanResponderRelease: (_, gs) => {
+        if (Math.abs(gs.dx) < 50) return;
+        const d = new Date(selectedDateRef.current + 'T00:00:00');
+        d.setDate(d.getDate() + (gs.dx < 0 ? 1 : -1));
+        const dk = dateKey(d);
+        setSelectedDate(dk);
+        setViewMonth({ y: d.getFullYear(), m: d.getMonth() });
+      },
+    })
+  ).current;
+
   // ── getTargetCellPos — measureInWindow 없이 수학으로 셀 중심 계산 ──
   const getTargetCellPos = (dateStr) => {
     const [y, m, d] = dateStr.split('-').map(Number);
-    const firstDay  = new Date(y, m - 1, 1).getDay(); // 0=일
+    // calStartSunday 설정 반영 (캘린더 렌더링과 동일한 firstDow 계산)
+    const rawDow1  = new Date(y, m - 1, 1).getDay(); // 0=일
+    const firstDay = settings.calStartSunday ? rawDow1 : (rawDow1 + 6) % 7;
     const cellIndex = firstDay + d - 1;
     const col = cellIndex % 7;
     const row = Math.floor(cellIndex / 7);
 
     const cellW = (SW - 36) / 7;  // paddingHorizontal 18×2 = 36
-    const cellH = 50;              // paddingVertical(6) + circle(30) + gap(2) + dayNum(12)
+    const cellH = 50;              // paddingVertical(3*2) + circle(30) + gap(2) + dayNum(~12)
     const ROW_GAP = 3;             // calGrid rowGap
 
-    // calSheet 상단 Y: 상태바 + calSheet paddingTop
-    const sheetTop = insets.top + 20;
-    // 헤더 높이: calHeader(NavBtn 34 + marginBottom 16) + calDowRow(~14 + marginBottom 6)
-    const headerH = 70;
+    // calSheet 상단 Y: calSheet paddingTop(insets.top + 16)
+    const sheetTop = insets.top + 16;
+    // 헤더 높이: calHeader(marginTop 8 + NavBtn 34 + marginBottom 16) + calDowRow(~14 + marginBottom 6)
+    const headerH = 78;
 
     const cellX = 18 + col * cellW + cellW / 2;
     const cellY = sheetTop + headerH + row * (cellH + ROW_GAP) + cellH / 2;
@@ -167,14 +217,15 @@ export default function HomeScreen() {
 
   // ── 스탬프 애니메이션 ─────────────────────────────────
   const [stampDate, setStampDate] = useState(null);
-  const stampScale   = useRef(new Animated.Value(2.4)).current;
-  const stampOpacity = useRef(new Animated.Value(0)).current;
-  const rippleScale  = useRef(new Animated.Value(1)).current;
-  const rippleOpacity = useRef(new Animated.Value(0.6)).current;
+  const stampScale    = useRef(new Animated.Value(2.4)).current;
+  const stampOpacity  = useRef(new Animated.Value(0)).current;
+  const rippleScale   = useRef(new Animated.Value(1)).current;
+  const rippleOpacity = useRef(new Animated.Value(0)).current;
+  const rippleScale2  = useRef(new Animated.Value(1)).current;
+  const rippleOpacity2 = useRef(new Animated.Value(0)).current;
 
   // ── 팔레트 설정 ──────────────────────────────────────
-  const paletteSize = 'medium'; // TODO: settings 연결
-  const PALETTE_SIZE = getPaletteSize(paletteSize);
+  const PALETTE_SIZE = getPaletteSize(settings.paletteSize);
 
   // ── 파생값 ───────────────────────────────────────────
   const doneCount  = todos.filter(t => t.done).length;
@@ -207,13 +258,15 @@ export default function HomeScreen() {
   const calMonth    = viewMonth.m;
   const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
   const rawDow1     = new Date(calYear, calMonth, 1).getDay();
-  const firstDow    = rawDow1; // 일요일 시작 고정
+  const firstDow    = settings.calStartSunday ? rawDow1 : (rawDow1 + 6) % 7;
   const monthName   = new Date(calYear, calMonth, 1)
     .toLocaleString('ko-KR', { month: 'long' });
 
   // ─────────────────────────────────────────────────────
   // Effects
   // ─────────────────────────────────────────────────────
+
+  useEffect(() => { selectedDateRef.current = selectedDate; }, [selectedDate]);
 
   // 자정 날짜 자동 갱신
   useEffect(() => {
@@ -254,14 +307,14 @@ export default function HomeScreen() {
     loadMonthHistory(viewMonth.y, viewMonth.m);
   }, [viewMonth, userId]);
 
-  // 캘린더 열기 애니메이션 + spring 완료 시 셀 좌표 캐싱
+  // 캘린더 열기 애니메이션
   useEffect(() => {
-    if (showCal) {
-      calTransY.setValue(-SH * 0.5);
-      Animated.spring(calTransY, {
-        toValue: 0, damping: 20, stiffness: 200, useNativeDriver: true,
-      }).start();
-    }
+    if (!showCal) return;
+    calTransY.setValue(-SH * 0.5);
+    Animated.spring(calTransY, {
+      toValue: 0, damping: 20, stiffness: 200, useNativeDriver: true,
+    }).start();
+    return () => calTransY.stopAnimation();
   }, [showCal]);
 
   // ─────────────────────────────────────────────────────
@@ -363,6 +416,8 @@ export default function HomeScreen() {
    */
   const handleToggleTodo = async (todo, catColor) => {
     if (!userId) return;
+    if (pendingTodoIds.current.has(todo.id)) return;
+    pendingTodoIds.current.add(todo.id);
     const willDone = !todo.done;
     const dk = selectedDate;
 
@@ -425,12 +480,14 @@ export default function HomeScreen() {
         ...prev,
         [dk]: { drops: newDrops, total: newTotal },
       }));
-    } catch (_) {
+    } catch (error) {
       // ── ③ 롤백 ──
       setTodos(prevTodos);
       setPaletteDrops(prevDrops);
       setAnimDrop(null);
       Alert.alert('오류', '업데이트에 실패했어요');
+    } finally {
+      pendingTodoIds.current.delete(todo.id);
     }
   };
 
@@ -449,7 +506,7 @@ export default function HomeScreen() {
     const seed = (Math.floor(Math.random() * 99999) + 1) * 31;
 
     // 낙관적 추가
-    const tempId  = `temp_${Date.now()}`;
+    const tempId  = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const newTodo = {
       id: tempId, user_id: userId,
       cat_id: catId, date: selectedDate,
@@ -576,6 +633,11 @@ export default function HomeScreen() {
 
   // 더블탭 감지용 타이머 맵 { [todoId]: timestamp }
   const doubleTapTimers = useRef({});
+  // 더블탭 setTimeout ID 맵 { [todoId]: timeoutId } — unmount 시 정리용
+  const doubleTapTimeoutIds = useRef({});
+
+  // 토글 중복 실행 방지 (빠른 더블탭 시 낙관적 업데이트 중복 방지)
+  const pendingTodoIds = useRef(new Set());
 
   // 마지막 미완료 할일 글로우 펄스 애니메이션
   const glowAnim = useRef(new Animated.Value(0)).current;
@@ -615,15 +677,27 @@ export default function HomeScreen() {
     return () => glowLoop.current?.stop();
   }, [remainingCount, totalCount]);
 
+  // 더블탭 타이머 전체 정리 (unmount 시)
+  useEffect(() => {
+    return () => {
+      Object.values(doubleTapTimeoutIds.current).forEach(id => clearTimeout(id));
+    };
+  }, []);
+
   // 더블탭 감지
   const handleTodoTap = (todoId, onDoubleTap) => {
     const now = Date.now();
     if (doubleTapTimers.current[todoId] && now - doubleTapTimers.current[todoId] < 320) {
       delete doubleTapTimers.current[todoId];
+      clearTimeout(doubleTapTimeoutIds.current[todoId]);
+      delete doubleTapTimeoutIds.current[todoId];
       onDoubleTap();
     } else {
       doubleTapTimers.current[todoId] = now;
-      setTimeout(() => { delete doubleTapTimers.current[todoId]; }, 380);
+      doubleTapTimeoutIds.current[todoId] = setTimeout(() => {
+        delete doubleTapTimers.current[todoId];
+        delete doubleTapTimeoutIds.current[todoId];
+      }, 380);
     }
   };
 
@@ -638,6 +712,7 @@ export default function HomeScreen() {
 
   // 카테고리 드래그 순서 변경 저장
   const handleCategoryReorder = async (newOrder) => {
+    const prevCategories = categories;
     setCategories(newOrder);
     try {
       await Promise.all(
@@ -647,7 +722,9 @@ export default function HomeScreen() {
             .eq('id', cat.id),
         ),
       );
-    } catch (_) {}
+    } catch (_) {
+      setCategories(prevCategories); // 실패 시 롤백
+    }
   };
 
   // ─────────────────────────────────────────────────────
@@ -708,7 +785,7 @@ export default function HomeScreen() {
       <Text style={styles.emptyDesc}>
         상단 오른쪽 카테고리 버튼을 눌러서{'\n'}첫 번째 카테고리를 만들어보세요
       </Text>
-      <TouchableOpacity onPress={() => setShowCatModal(true)} style={styles.emptyBtn}>
+      <TouchableOpacity onPress={() => setShowCatModal(true)} style={styles.emptyBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
         <Text style={styles.emptyBtnText}>카테고리 만들기</Text>
       </TouchableOpacity>
     </View>
@@ -744,6 +821,7 @@ export default function HomeScreen() {
             isDone && { borderColor: todoColor, backgroundColor: todoColor },
           ]}
           activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           {isDone && <Text style={styles.checkmark}>✓</Text>}
         </TouchableOpacity>
@@ -795,14 +873,15 @@ export default function HomeScreen() {
 
         {/* 편집 저장 / 삭제 버튼 */}
         {isEditing ? (
-          <TouchableOpacity onPress={handleSaveEdit} style={styles.saveBtn}>
+          <TouchableOpacity onPress={() => handleSaveEdit()} style={styles.saveBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={styles.saveBtnText}>저장</Text>
           </TouchableOpacity>
         ) : !todo.routine_id ? (
           <TouchableOpacity
             onPress={() => handleDeleteTodo(todo)}
             style={styles.deleteBtn}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
             <Text style={styles.deleteBtnText}>✕</Text>
           </TouchableOpacity>
@@ -830,6 +909,7 @@ export default function HomeScreen() {
                 { backgroundColor: cat.color + '15', borderColor: cat.color + '28' },
               ]}
               activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <View style={[styles.catDot, {
                 backgroundColor: cat.color,
@@ -844,7 +924,7 @@ export default function HomeScreen() {
             <View style={{ flex: 1 }} />
 
             {/* 드래그 핸들 */}
-            <TouchableOpacity onLongPress={drag} style={styles.dragHandle}>
+            <TouchableOpacity onLongPress={drag} style={styles.dragHandle} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={styles.dragHandleText}>⠿</Text>
             </TouchableOpacity>
 
@@ -856,6 +936,8 @@ export default function HomeScreen() {
                 setTimeout(() => inputRef.current?.focus(), 50);
               }}
               style={styles.catAddBtn}
+              activeOpacity={0.7}
+              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
             >
               <Text style={styles.catAddBtnText}>+</Text>
             </TouchableOpacity>
@@ -873,6 +955,8 @@ export default function HomeScreen() {
                     { backgroundColor: color },
                     cat.color === color && styles.colorPickerDotActive,
                   ]}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 />
               ))}
             </View>
@@ -901,6 +985,8 @@ export default function HomeScreen() {
               <TouchableOpacity
                 onPress={() => handleAddTodo(cat.id, cat.color)}
                 style={styles.addTodoSubmit}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <Text style={styles.addTodoSubmitText}>↵</Text>
               </TouchableOpacity>
@@ -937,6 +1023,8 @@ export default function HomeScreen() {
                 <TouchableOpacity
                   onPress={() => setShowCatModal(false)}
                   style={styles.modalCloseBtn}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                 >
                   <Text style={styles.modalCloseBtnText}>✕</Text>
                 </TouchableOpacity>
@@ -949,18 +1037,10 @@ export default function HomeScreen() {
                       <View style={[styles.modalCatDot, { backgroundColor: cat.color }]} />
                       <Text style={styles.modalCatName}>{cat.name}</Text>
                       <TouchableOpacity
-                        onPress={() =>
-                          Alert.alert(
-                            '카테고리 삭제',
-                            `'${cat.name}'과 관련 할 일을 모두 삭제할까요?`,
-                            [
-                              { text: '취소', style: 'cancel' },
-                              { text: '삭제', style: 'destructive', onPress: () => handleDeleteCategory(cat.id) },
-                            ]
-                          )
-                        }
+                        onPress={() => setConfirmDelCat({ id: cat.id, name: cat.name })}
                         style={styles.modalCatDelBtn}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        activeOpacity={0.7}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       >
                         <Text style={styles.modalCatDelBtnText}>✕</Text>
                       </TouchableOpacity>
@@ -979,6 +1059,8 @@ export default function HomeScreen() {
                       { backgroundColor: color },
                       newCatColor === color && styles.catColorOptionActive,
                     ]}
+                    activeOpacity={0.7}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                   />
                 ))}
               </View>
@@ -994,7 +1076,7 @@ export default function HomeScreen() {
                   autoFocus
                   returnKeyType="done"
                 />
-                <TouchableOpacity onPress={handleAddCategory} style={styles.modalAddBtn}>
+                <TouchableOpacity onPress={() => handleAddCategory()} style={styles.modalAddBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                   <Text style={styles.modalAddBtnText}>+</Text>
                 </TouchableOpacity>
               </View>
@@ -1016,12 +1098,13 @@ export default function HomeScreen() {
   const handleAnimDone = useCallback(() => {
     const wasLast = animDrop?.isLast;
     setAnimDrop(null);
-    if (wasLast && !blackShownDates.current.has(`${selectedDate}:${totalCount}`)) {
+    if (!wasLast) return;
+    if (!settings.blackAnimationOn) return;
+    if (!blackShownDates.current.has(`${selectedDate}:${totalCount}`)) {
       blackShownDates.current.add(`${selectedDate}:${totalCount}`);
-      // BLACK 달성 애니메이션 트리거 (5단계 blackPhase)
       setBlackPhase('in');
     }
-  }, [animDrop, selectedDate, totalCount]);
+  }, [animDrop, selectedDate, totalCount, settings.blackAnimationOn]);
 
   // ─────────────────────────────────────────────────────
   // 5단계 ▼ BLACK 달성 페이즈 관리
@@ -1042,27 +1125,49 @@ export default function HomeScreen() {
   // 'text' — 200ms 페이드인 → 700ms 표시 → 200ms 페이드아웃 → 'orb'
   useEffect(() => {
     if (blackPhase !== 'text') return;
+    let cancelled = false;
     blackTextAnim.setValue(0);
     Animated.timing(blackTextAnim, {
       toValue: 1, duration: 200, useNativeDriver: true,
     }).start(() => {
+      if (cancelled) return;
       blackTimer.current = setTimeout(() => {
+        if (cancelled) return;
         Animated.timing(blackTextAnim, {
           toValue: 0, duration: 200, useNativeDriver: true,
         }).start(({ finished }) => {
-          if (finished) setBlackPhase('orb');
+          if (finished && !cancelled) setBlackPhase('orb');
         });
       }, 700);
     });
-    return () => clearTimeout(blackTimer.current);
+    return () => {
+      cancelled = true;
+      clearTimeout(blackTimer.current);
+    };
   }, [blackPhase]);
 
-  // 'orb' — 수학 계산으로 셀 중심 좌표 결정 (measureInWindow 없음)
+  // 'orb' — measureInWindow로 선택 셀 중심 좌표 결정 (실제 레이아웃 기반)
   useEffect(() => {
     if (blackPhase !== 'orb') return;
-    const pos = getTargetCellPos(selectedDate);
-    console.log('[FlyingOrb] from:', SW / 2, SH / 2, '→ to:', pos.x, pos.y);
-    setFlyOrb({ toX: pos.x, toY: pos.y });
+    const measure = () => {
+      if (targetCellRef.current) {
+        targetCellRef.current.measureInWindow((x, y, width, height) => {
+          if (width > 0 && height > 0) {
+            setFlyOrb({ toX: x + width / 2, toY: y + height / 2 });
+          } else {
+            // measureInWindow 실패 시 수학 계산으로 fallback
+            const pos = getTargetCellPos(selectedDate);
+            setFlyOrb({ toX: pos.x, toY: pos.y });
+          }
+        });
+      } else {
+        const pos = getTargetCellPos(selectedDate);
+        setFlyOrb({ toX: pos.x, toY: pos.y });
+      }
+    };
+    // 캘린더 스프링 애니메이션이 완전히 정착한 뒤 측정 (레이아웃 안정화)
+    const t = setTimeout(measure, 80);
+    return () => clearTimeout(t);
   }, [blackPhase]);
 
   // 'stamp' — 스탬프 리플 + 오버레이 페이드아웃
@@ -1071,32 +1176,56 @@ export default function HomeScreen() {
     setFlyOrb(null);
     setStampDate(selectedDate);
 
-    // 오버레이 페이드아웃 (캘린더 stamp 보이도록)
     Animated.timing(blackFadeAnim, {
       toValue: 0, duration: 500, useNativeDriver: true,
     }).start();
 
-    // 스탬프 + 리플 애니메이션
     stampScale.setValue(2.4);
     stampOpacity.setValue(0);
     rippleScale.setValue(1);
-    rippleOpacity.setValue(0.6);
+    rippleOpacity.setValue(0);
+    rippleScale2.setValue(1);
+    rippleOpacity2.setValue(0);
     Animated.parallel([
+      // 스탬프 도장 애니메이션
       Animated.timing(stampScale, {
         toValue: 1, duration: 300, useNativeDriver: true,
       }),
       Animated.timing(stampOpacity, {
         toValue: 1, duration: 300, useNativeDriver: true,
       }),
+      // 1차 리플 — 즉시 시작, 넓게 퍼짐
       Animated.sequence([
-        Animated.delay(80),
+        Animated.delay(40),
         Animated.parallel([
           Animated.timing(rippleScale, {
-            toValue: 2.2, duration: 300, useNativeDriver: true,
+            toValue: 5.5, duration: 550, useNativeDriver: true,
           }),
-          Animated.timing(rippleOpacity, {
-            toValue: 0, duration: 300, useNativeDriver: true,
+          Animated.sequence([
+            Animated.timing(rippleOpacity, {
+              toValue: 0.85, duration: 60, useNativeDriver: true,
+            }),
+            Animated.timing(rippleOpacity, {
+              toValue: 0, duration: 490, useNativeDriver: true,
+            }),
+          ]),
+        ]),
+      ]),
+      // 2차 리플 — 약간 늦게, 더 크게
+      Animated.sequence([
+        Animated.delay(200),
+        Animated.parallel([
+          Animated.timing(rippleScale2, {
+            toValue: 4.0, duration: 480, useNativeDriver: true,
           }),
+          Animated.sequence([
+            Animated.timing(rippleOpacity2, {
+              toValue: 0.55, duration: 60, useNativeDriver: true,
+            }),
+            Animated.timing(rippleOpacity2, {
+              toValue: 0, duration: 420, useNativeDriver: true,
+            }),
+          ]),
         ]),
       ]),
     ]).start(() => {
@@ -1163,7 +1292,9 @@ export default function HomeScreen() {
   const renderCalendarView = () => {
     if (!showCal && !calClosing) return null;
 
-    const DOW_LABELS = ['일', '월', '화', '수', '목', '금', '토'];
+    const DOW_LABELS = settings.calStartSunday
+      ? ['일', '월', '화', '수', '목', '금', '토']
+      : ['월', '화', '수', '목', '금', '토', '일'];
     const emptyCells = Array.from({ length: firstDow });
     const dayCells   = Array.from({ length: daysInMonth }, (_, i) => i + 1);
 
@@ -1175,20 +1306,21 @@ export default function HomeScreen() {
         <TouchableOpacity
           style={styles.calOverlay}
           activeOpacity={1}
-          onPress={closeCalendar}
+          onPress={() => closeCalendar()}
         >
           <Animated.View
-            style={[styles.calSheet, { transform: [{ translateY: calTransY }] }]}
+            style={[styles.calSheet, { transform: [{ translateY: calTransY }], paddingTop: insets.top + 16 }]}
+            {...calPanResponder.panHandlers}
           >
             <TouchableOpacity activeOpacity={1} onPress={() => {}}>
 
               {/* 월 이동 헤더 */}
               <View style={styles.calHeader}>
-                <TouchableOpacity onPress={() => goMonth(-1)} style={styles.calNavBtn}>
+                <TouchableOpacity onPress={() => goMonth(-1)} style={styles.calNavBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                   <Text style={styles.calNavText}>‹</Text>
                 </TouchableOpacity>
                 <Text style={styles.calTitle}>{calYear}년 {monthName}</Text>
-                <TouchableOpacity onPress={() => goMonth(1)} style={styles.calNavBtn}>
+                <TouchableOpacity onPress={() => goMonth(1)} style={styles.calNavBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                   <Text style={styles.calNavText}>›</Text>
                 </TouchableOpacity>
               </View>
@@ -1251,35 +1383,55 @@ export default function HomeScreen() {
                       }}
                       style={[styles.calCell, isSel && styles.calCellSel, cellBorder]}
                       activeOpacity={0.7}
+                      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     >
-                      <Animated.View
-                        style={[
-                          styles.calCircle,
-                          isStamp && {
-                            transform: [{ scale: stampScale }],
-                            opacity: stampOpacity,
-                          },
-                        ]}
-                      >
-                        {hasDrops ? (
-                          renderCalendarMiniPalette(drops, total, isDone, 30)
-                        ) : (
-                          <View style={[
-                            styles.calCirclePlain,
-                            isTod  && styles.calCircleToday,
-                            isSel  && !isTod && styles.calCircleSel,
-                          ]}>
-                            {isTod && <View style={styles.calTodayDot} />}
-                          </View>
-                        )}
-                        {isDone && hasDrops && <View style={styles.calDoneRing} />}
+                      <View style={{ width: 30, height: 30 }}>
+                        {/* 팔레트 콘텐츠 — 클립 전용 inner layer */}
+                        <View style={{
+                          position: 'absolute',
+                          width: 30, height: 30,
+                          borderRadius: 15,
+                          backgroundColor: hasDrops ? C.surface : 'transparent',
+                          overflow: 'hidden',
+                        }}>
+                          <Animated.View
+                            style={[
+                              styles.calCircle,
+                              isStamp && {
+                                transform: [{ scale: stampScale }],
+                                opacity: stampOpacity,
+                              },
+                            ]}
+                          >
+                            {hasDrops ? (
+                              renderCalendarMiniPalette(drops, total, isDone, 30)
+                            ) : (
+                              <View style={[
+                                styles.calCirclePlain,
+                                isTod  && styles.calCircleToday,
+                                isSel  && !isTod && styles.calCircleSel,
+                              ]}>
+                                {isTod && <View style={styles.calTodayDot} />}
+                              </View>
+                            )}
+                            {isDone && hasDrops && <View style={styles.calDoneRing} />}
+                          </Animated.View>
+                        </View>
+                        {/* 리플 링 — overflow:hidden 밖에서 자유롭게 퍼짐 */}
                         {isStamp && (
-                          <Animated.View style={[
-                            styles.calRipple,
-                            { transform: [{ scale: rippleScale }], opacity: rippleOpacity },
-                          ]} />
+                          <>
+                            <Animated.View style={[
+                              styles.calRipple,
+                              { transform: [{ scale: rippleScale }], opacity: rippleOpacity },
+                            ]} />
+                            <Animated.View style={[
+                              styles.calRipple,
+                              styles.calRipple2,
+                              { transform: [{ scale: rippleScale2 }], opacity: rippleOpacity2 },
+                            ]} />
+                          </>
                         )}
-                      </Animated.View>
+                      </View>
 
                       <Text
                         style={[
@@ -1361,15 +1513,20 @@ export default function HomeScreen() {
     <View style={styles.root}>
 
       {/* ══ 상단 고정 영역 (팔레트 + 헤더) ══ */}
-      <View style={styles.topArea}>
+      <View style={[styles.topArea, { paddingTop: insets.top + 8 }]}>
 
         {/* 날짜 헤더 */}
         <View style={styles.headerRow}>
           {/* Left: makeblack 타이틀 + 날짜 네비 */}
           <View style={styles.dateCol}>
-            <Text style={styles.appTitle}>MAKEBLACK</Text>
+            <Text style={styles.appTitle}>makeblack</Text>
             <View style={styles.dateNav}>
-              <TouchableOpacity onPress={() => goDay(-1)} style={styles.navBtn} hitSlop={{ top:8, bottom:8, left:8, right:8 }}>
+              <TouchableOpacity
+                onPress={() => goDay(-1)}
+                style={styles.navBtn}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
                 <Text style={styles.navArrow}>◀</Text>
               </TouchableOpacity>
               <Text style={styles.dateText} numberOfLines={1}>
@@ -1377,7 +1534,12 @@ export default function HomeScreen() {
                   ? '오늘'
                   : selDateObj.toLocaleDateString('ko-KR', { month: 'long', day: 'numeric', weekday: 'short' })}
               </Text>
-              <TouchableOpacity onPress={() => goDay(1)} style={styles.navBtn} hitSlop={{ top:8, bottom:8, left:8, right:8 }}>
+              <TouchableOpacity
+                onPress={() => goDay(1)}
+                style={styles.navBtn}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+              >
                 <Text style={styles.navArrow}>▶</Text>
               </TouchableOpacity>
             </View>
@@ -1385,17 +1547,17 @@ export default function HomeScreen() {
 
           {/* Right: 캘린더 + 카테고리 버튼 */}
           <View style={styles.headerBtns}>
-            <TouchableOpacity onPress={() => setShowCal(true)} style={styles.headerPill}>
+            <TouchableOpacity onPress={() => setShowCal(true)} style={styles.headerPill} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={styles.headerPillText}>캘린더</Text>
             </TouchableOpacity>
-            <TouchableOpacity onPress={() => setShowCatModal(true)} style={styles.headerPill}>
+            <TouchableOpacity onPress={() => setShowCatModal(true)} style={styles.headerPill} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={styles.headerPillText}>카테고리</Text>
             </TouchableOpacity>
           </View>
         </View>
 
         {/* 팔레트 캔버스 */}
-        <View style={styles.paletteWrap}>
+        <View style={styles.paletteWrap} {...palettePanResponder.panHandlers}>
           <PaletteCanvas
             drops={paletteDrops}
             totalCount={totalCount}
@@ -1425,7 +1587,7 @@ export default function HomeScreen() {
             keyExtractor={item => String(item.id)}
             onDragEnd={({ data }) => handleCategoryReorder(data)}
             renderItem={renderCategoryItem}
-            contentContainerStyle={styles.scrollContent}
+            contentContainerStyle={[styles.scrollContent, { paddingBottom: insets.bottom + 16 }]}
             keyboardShouldPersistTaps="handled"
           />
         </View>
@@ -1439,6 +1601,36 @@ export default function HomeScreen() {
 
       {/* BLACK 오버레이 + FlyingOrb — 별도 Modal */}
       {renderBlackModal()}
+
+      {/* 카테고리 삭제 확인 모달 */}
+      <Modal visible={!!confirmDelCat} transparent animationType="fade" onRequestClose={() => setConfirmDelCat(null)}>
+        <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center', padding: 32 }}>
+          <View style={{ backgroundColor: C.surface, borderRadius: 22, padding: 24, width: '100%' }}>
+            <Text style={{ fontSize: 16, fontWeight: '700', color: C.text }}>
+              {confirmDelCat?.name}을 삭제할까요?
+            </Text>
+            <Text style={{ fontSize: 13, color: C.muted, marginTop: 8, lineHeight: 20 }}>
+              {'관련 할일이 모두 삭제됩니다.\n이전 기록도 함께 지워집니다.'}
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 10, marginTop: 20 }}>
+              <TouchableOpacity
+                style={{ flex: 1, borderWidth: 1, borderColor: C.border, borderRadius: 12, paddingVertical: 12, alignItems: 'center' }}
+                onPress={() => setConfirmDelCat(null)}
+                activeOpacity={0.7}
+              >
+                <Text style={{ color: C.text, fontSize: 14 }}>취소</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={{ flex: 1, backgroundColor: '#ff4444', borderRadius: 12, paddingVertical: 12, alignItems: 'center' }}
+                onPress={() => handleDeleteCategory(confirmDelCat.id)}
+                activeOpacity={0.7}
+              >
+                <Text style={{ color: '#fff', fontSize: 14, fontWeight: '600' }}>삭제</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1466,7 +1658,6 @@ const styles = StyleSheet.create({
   // ── 상단 영역 ──
   topArea: {
     flexShrink: 0,
-    paddingTop: 14,
     paddingHorizontal: 18,
   },
 
@@ -1475,26 +1666,30 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 10,
+    marginBottom: 6,
   },
   dateCol: {
-    alignItems: 'center',
+    alignItems: 'flex-start',
   },
   appTitle: {
-    fontSize: 9,
+    fontSize: 10,
     color: C.dim,
     letterSpacing: 3,
     textTransform: 'uppercase',
-    marginBottom: 2,
+    marginBottom: 1,
+    width: 150,
+    marginLeft: 0,
+    textAlign: 'center',
   },
   dateNav: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    width: 150,
+    marginLeft: 0,
+    marginTop: 2,
   },
   navBtn: {
-    width: 13,
-    height: 13,
+    width: 28,
     alignItems: 'center',
     justifyContent: 'center',
     opacity: 0.55,
@@ -1505,11 +1700,11 @@ const styles = StyleSheet.create({
     lineHeight: 9,
   },
   dateText: {
+    flex: 1,
     fontSize: 17,
     fontWeight: '700',
     letterSpacing: -0.34,
     color: C.text,
-    width: 120,
     textAlign: 'center',
   },
   headerBtns: {
@@ -1518,7 +1713,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   headerPill: {
-    height: 28,
+    minHeight: 44,
     paddingHorizontal: 11,
     borderRadius: R.full,
     backgroundColor: C.surface,
@@ -1579,16 +1774,15 @@ const styles = StyleSheet.create({
     backgroundColor: C.surface,
     borderBottomLeftRadius: 28,
     borderBottomRightRadius: 28,
-    paddingTop: 20,
     paddingHorizontal: 18,
     paddingBottom: 28,
-    // iOS safe area용 추가 패딩은 필요 시 Platform으로 조정
   },
   // 월 이동 헤더
   calHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    marginTop: 8,
     marginBottom: 16,
   },
   calNavBtn: {
@@ -1637,7 +1831,7 @@ const styles = StyleSheet.create({
     gap: 2,
     paddingVertical: 3,
     paddingHorizontal: 1,
-    borderRadius: R.sm,
+    borderRadius: 8,
   },
   calCellSel: {
     backgroundColor: '#222222',
@@ -1685,8 +1879,12 @@ const styles = StyleSheet.create({
   // 스탬프 리플
   calRipple: {
     position: 'absolute',
-    top: -4, left: -4, right: -4, bottom: -4,
-    borderRadius: 19,
+    top: 0, left: 0, right: 0, bottom: 0,
+    borderRadius: 15,
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.9)',
+  },
+  calRipple2: {
     borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.6)',
   },
@@ -1749,7 +1947,6 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingTop: 12,
     paddingHorizontal: 18,
-    paddingBottom: 110,
   },
 
   // ── 빈 상태 ──
@@ -1825,7 +2022,10 @@ const styles = StyleSheet.create({
     color: C.dim,
   },
   dragHandle: {
-    padding: 4,
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   dragHandleText: {
     fontSize: 14,
@@ -1840,12 +2040,9 @@ const styles = StyleSheet.create({
     color: C.dim,
   },
   catAddBtn: {
-    width: 26,
-    height: 26,
+    minWidth: 44,
+    minHeight: 44,
     borderRadius: 13,
-    backgroundColor: C.surface,
-    borderWidth: 1,
-    borderColor: C.border2,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -1864,9 +2061,11 @@ const styles = StyleSheet.create({
     paddingLeft: 8,
   },
   colorPickerDot: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   colorPickerDotActive: {
     borderWidth: 2,

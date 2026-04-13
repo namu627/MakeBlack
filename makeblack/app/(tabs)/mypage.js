@@ -7,36 +7,30 @@
 // ══════════════════════════════════════════════════════
 
 import { useState, useEffect, useCallback, useRef } from 'react';
+import * as ImagePicker from 'expo-image-picker';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   View, Text, Image, ScrollView, TouchableOpacity, StyleSheet,
   Alert, Switch, ActivityIndicator, TextInput, Modal,
   Pressable, KeyboardAvoidingView, Platform,
 } from 'react-native';
-import * as ImagePicker from 'expo-image-picker';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useFocusEffect } from 'expo-router';
 import { supabase } from '../../lib/supabase';
+import { THEMES, radius, STORAGE_KEYS } from '../../constants/theme';
 import { dateKey } from '../../lib/colorMath';
-// expo-secure-store 미설치 → AsyncStorage로 PIN 저장 (프로덕션에서는 SecureStore 권장)
-// import * as SecureStore from 'expo-secure-store';
 
 // ══════════════════════════════════════════════════════
 // 상수
 // ══════════════════════════════════════════════════════
 
-const C = {
-  bg: '#0a0a0a', surface: '#141414', card: '#181818',
-  border: '#242424', border2: '#2e2e2e',
-  text: '#f0ece6', muted: '#888888', dim: '#555555',
-};
-
-const R = { sm: 10, md: 16, lg: 22, full: 999 };
+const C = THEMES.dark;
+const R = radius;
 
 const DOW_KR = ['일', '월', '화', '수', '목', '금', '토'];
 
-const SETTINGS_KEY = '@makeblack_settings';
-const PIN_KEY      = '@makeblack_pin';
+const SETTINGS_KEY = STORAGE_KEYS.SETTINGS;
+const PIN_KEY      = STORAGE_KEYS.PIN;
 
 const DEFAULT_SETTINGS = {
   paletteSize:          'medium',
@@ -86,6 +80,7 @@ export default function MyPageScreen() {
   const year       = now.getFullYear();
   const month      = now.getMonth();
   const monthLabel = `${year}년 ${month + 1}월`;
+
 
   // ══════════════════════════════════════════════════════
   // 초기화
@@ -142,7 +137,7 @@ export default function MyPageScreen() {
     try {
       const { data, error } = await supabase
         .from('users')
-        .select('id, name, handle, bio, avatar_url')
+        .select('id, name, handle, avatar_url')
         .eq('id', userId)
         .single();
       if (!error && data) setProfile(data);
@@ -156,22 +151,20 @@ export default function MyPageScreen() {
       Alert.alert('권한 필요', '갤러리 접근 권한이 필요해요');
       return;
     }
-    const result = await ImagePicker.launchImageLibraryAsync({
+    const imageResult = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
       allowsEditing: true,
       aspect: [1, 1],
       quality: 0.8,
       base64: true,
     });
-    if (result.canceled) return;
+    if (imageResult.canceled) return;
 
     setUploadingAvatar(true);
     try {
-      const base64 = result.assets[0].base64;
+      const base64 = imageResult.assets[0].base64;
       const byteArray = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
 
-      console.log('[avatar] uploading to:', `${userId}/avatar.jpg`);
-      console.log('[avatar] byteArray size:', byteArray.length);
       const { error: uploadError } = await supabase.storage
         .from('avatars')
         .upload(`${userId}/avatar.jpg`, byteArray, {
@@ -184,15 +177,16 @@ export default function MyPageScreen() {
         .from('avatars')
         .getPublicUrl(`${userId}/avatar.jpg`);
 
+      // DB에는 clean URL 저장 (캐시 파라미터 없이)
       const { error: updateError } = await supabase
         .from('users')
         .update({ avatar_url: publicUrl })
         .eq('id', userId);
       if (updateError) throw updateError;
 
-      await loadProfile();
+      // 로컬 state는 즉시 캐시 버스팅 URL로 갱신 (한 번만 적용)
+      setProfile(prev => prev ? { ...prev, avatar_url: publicUrl + '?t=' + Date.now() } : null);
     } catch (e) {
-      console.log('[avatar upload error]', e);
       Alert.alert('업로드 실패', '다시 시도해 주세요');
     } finally {
       setUploadingAvatar(false);
@@ -216,6 +210,7 @@ export default function MyPageScreen() {
       if (error) throw error;
 
       const rows = data ?? [];
+      const rowMap = Object.fromEntries(rows.map(r => [r.date, r]));
 
       let totalDone   = 0;
       let activeDays  = 0;
@@ -228,7 +223,7 @@ export default function MyPageScreen() {
 
       for (let day = 1; day <= daysInMonth; day++) {
         const dk    = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-        const row   = rows.find(r => r.date === dk);
+        const row   = rowMap[dk];
         const done  = row?.drops?.length ?? 0;
         const total = row?.total ?? 0;
         const prog  = total > 0 ? done / total : 0;
@@ -258,12 +253,13 @@ export default function MyPageScreen() {
         .gte('date', dateKey(sDate))
         .lte('date', today);
       const allRows = sData ?? [];
+      const allRowMap = Object.fromEntries(allRows.map(r => [r.date, r]));
       let streak = 0;
       for (let i = 0; i < 61; i++) {
         const d = new Date(today + 'T00:00:00');
         d.setDate(d.getDate() - i);
         const dk  = dateKey(d);
-        const row = allRows.find(r => r.date === dk);
+        const row = allRowMap[dk];
         if (row && row.total > 0 && (row.drops?.length ?? 0) >= row.total) streak++;
         else if (i > 0) break;
       }
@@ -306,7 +302,8 @@ export default function MyPageScreen() {
 
   return (
     <ScrollView
-      style={[styles.container, { paddingTop: insets.top + 8, backgroundColor: C.bg }]}
+      style={[styles.container, { paddingTop: insets.top + 12, backgroundColor: C.bg }]}
+      contentContainerStyle={{ paddingBottom: insets.bottom + 16 }}
       showsVerticalScrollIndicator={false}
     >
       {/* ══════════════════════════════════════════════
@@ -317,14 +314,15 @@ export default function MyPageScreen() {
         <TouchableOpacity
           onPress={() => setShowSettings(true)}
           style={styles.gearBtn}
-          hitSlop={8}
+          activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           <Text style={styles.gearBtnTxt}>⚙</Text>
         </TouchableOpacity>
 
         {/* 아바타 + 이름 */}
         <View style={styles.profileRow}>
-          <TouchableOpacity onPress={pickAndUploadAvatar} style={styles.avatar} activeOpacity={0.8}>
+          <TouchableOpacity onPress={() => pickAndUploadAvatar()} style={styles.avatar} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             {profile?.avatar_url ? (
               <Image source={{ uri: profile.avatar_url }} style={styles.avatarImg} />
             ) : (
@@ -341,9 +339,6 @@ export default function MyPageScreen() {
             {displayHandle ? <Text style={styles.profileHandle}>{displayHandle}</Text> : null}
           </View>
         </View>
-
-        {/* 소개 */}
-        {profile?.bio ? <Text style={styles.profileBio}>{profile.bio}</Text> : null}
 
         {/* BLACK 달성 수 */}
         <View style={styles.profileStats}>
@@ -720,7 +715,7 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
 
   return (
     <Modal visible transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={ssStyles.backdrop} onPress={onClose} />
+      <Pressable style={ssStyles.backdrop} onPress={() => onClose()} />
 
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -734,14 +729,14 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
           {/* 헤더 */}
           <View style={ssStyles.header}>
             {section ? (
-              <TouchableOpacity onPress={back} style={ssStyles.backBtn} hitSlop={8}>
+              <TouchableOpacity onPress={() => back()} style={ssStyles.backBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                 <Text style={ssStyles.backBtnTxt}>‹</Text>
               </TouchableOpacity>
             ) : null}
             <Text style={ssStyles.headerTitle}>
               {section ? currentSection?.label : '설정'}
             </Text>
-            <TouchableOpacity onPress={onClose} style={ssStyles.closeBtn} hitSlop={8}>
+            <TouchableOpacity onPress={() => onClose()} style={ssStyles.closeBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <Text style={ssStyles.closeBtnTxt}>✕</Text>
             </TouchableOpacity>
           </View>
@@ -754,6 +749,8 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                 key={s.key}
                 onPress={() => setSection(s.key)}
                 style={[ssStyles.menuRow, i === sections.length - 1 && { borderBottomWidth: 0 }]}
+                activeOpacity={0.7}
+                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
                 <View style={ssStyles.menuIcon}>
                   <Text style={ssStyles.menuIconTxt}>{s.icon}</Text>
@@ -773,7 +770,7 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
               <>
                 {/* 프로필 사진 */}
                 <View style={ssStyles.avatarRow}>
-                  <TouchableOpacity onPress={onAvatarPress} style={ssStyles.avatarCircle} activeOpacity={0.8}>
+                  <TouchableOpacity onPress={() => onAvatarPress()} style={ssStyles.avatarCircle} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                     {profile?.avatar_url ? (
                       <Image source={{ uri: profile.avatar_url }} style={ssStyles.avatarCircleImg} />
                     ) : (
@@ -787,7 +784,7 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                       </View>
                     )}
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={onAvatarPress} disabled={uploadingAvatar}>
+                  <TouchableOpacity onPress={() => onAvatarPress()} disabled={uploadingAvatar} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                     <Text style={ssStyles.editBtnTxt}>
                       {uploadingAvatar ? '업로드 중...' : '사진 변경'}
                     </Text>
@@ -805,23 +802,10 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                   saving={savingField}
                 />
 
-                {/* 소개 */}
-                <AccountField
-                  label="소개"
-                  value={profile?.bio ?? ''}
-                  editField={editField}
-                  fieldKey="bio"
-                  setEditField={setEditField}
-                  onSave={(v) => saveField('bio', v)}
-                  saving={savingField}
-                  multiline
-                  placeholder="소개를 입력해 주세요"
-                />
-
                 {/* 핸들 — 별도 검증 UI */}
                 <View style={[ssStyles.row, { flexDirection: 'column', alignItems: 'flex-start' }]}>
                   <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: '100%', marginBottom: 6 }}>
-                    <Text style={ssStyles.fieldLabel}>고유 아이디 (핸들)</Text>
+                    <Text style={ssStyles.fieldLabel}>사용자 아이디</Text>
                     <Text style={[ssStyles.rowSub, { fontSize: 9 }]}>팀 초대 시 사용돼요</Text>
                   </View>
                   {editField?.key === 'handle' ? (
@@ -853,6 +837,8 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                         <TouchableOpacity
                           onPress={() => { setEditField(null); setHandleError(''); setHandleOk(false); }}
                           style={ssStyles.fieldCancelBtn}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                         >
                           <Text style={{ color: C.muted, fontSize: 12 }}>취소</Text>
                         </TouchableOpacity>
@@ -860,6 +846,8 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                           onPress={() => handleOk && saveField('handle', editField.value)}
                           style={[ssStyles.fieldSaveBtn, !handleOk && ssStyles.fieldSaveBtnDisabled]}
                           disabled={!handleOk || savingField}
+                          activeOpacity={0.7}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                         >
                           <Text style={{ color: handleOk ? C.bg : C.dim, fontSize: 12, fontWeight: '700' }}>
                             {savingField ? '저장 중...' : '저장'}
@@ -872,7 +860,7 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                       <Text style={[ssStyles.fieldValue, { fontVariant: ['tabular-nums'] }]}>
                         {profile?.handle ? `@${profile.handle}` : <Text style={{ color: C.dim }}>미설정</Text>}
                       </Text>
-                      <TouchableOpacity onPress={() => { setEditField({ key: 'handle', value: profile?.handle ?? '' }); setHandleError(''); setHandleOk(false); }}>
+                      <TouchableOpacity onPress={() => { setEditField({ key: 'handle', value: profile?.handle ?? '' }); setHandleError(''); setHandleOk(false); }} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                         <Text style={ssStyles.editBtnTxt}>변경</Text>
                       </TouchableOpacity>
                     </View>
@@ -880,7 +868,7 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                 </View>
 
                 {/* 로그아웃 */}
-                <TouchableOpacity style={ssStyles.logoutBtn} onPress={() => {
+                <TouchableOpacity style={ssStyles.logoutBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }} onPress={() => {
                   Alert.alert('로그아웃', '로그아웃 할까요?', [
                     { text: '취소', style: 'cancel' },
                     { text: '로그아웃', style: 'destructive', onPress: () => supabase.auth.signOut() },
@@ -913,22 +901,22 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                     <View style={ssStyles.timePicker}>
                       {/* 시 */}
                       <View style={ssStyles.timeUnit}>
-                        <TouchableOpacity onPress={() => { const h = (remHour + 1) % 24; setRemHour(h); applyReminderTime(h, remMinute); }} style={ssStyles.timeBtn}>
+                        <TouchableOpacity onPress={() => { const h = (remHour + 1) % 24; setRemHour(h); applyReminderTime(h, remMinute); }} style={ssStyles.timeBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                           <Text style={ssStyles.timeBtnTxt}>▲</Text>
                         </TouchableOpacity>
                         <Text style={ssStyles.timeValue}>{String(remHour).padStart(2, '0')}</Text>
-                        <TouchableOpacity onPress={() => { const h = (remHour - 1 + 24) % 24; setRemHour(h); applyReminderTime(h, remMinute); }} style={ssStyles.timeBtn}>
+                        <TouchableOpacity onPress={() => { const h = (remHour - 1 + 24) % 24; setRemHour(h); applyReminderTime(h, remMinute); }} style={ssStyles.timeBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                           <Text style={ssStyles.timeBtnTxt}>▼</Text>
                         </TouchableOpacity>
                       </View>
                       <Text style={ssStyles.timeSep}>:</Text>
                       {/* 분 (5분 단위) */}
                       <View style={ssStyles.timeUnit}>
-                        <TouchableOpacity onPress={() => { const m = (remMinute + 5) % 60; setRemMinute(m); applyReminderTime(remHour, m); }} style={ssStyles.timeBtn}>
+                        <TouchableOpacity onPress={() => { const m = (remMinute + 5) % 60; setRemMinute(m); applyReminderTime(remHour, m); }} style={ssStyles.timeBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                           <Text style={ssStyles.timeBtnTxt}>▲</Text>
                         </TouchableOpacity>
                         <Text style={ssStyles.timeValue}>{String(remMinute).padStart(2, '0')}</Text>
-                        <TouchableOpacity onPress={() => { const m = (remMinute - 5 + 60) % 60; setRemMinute(m); applyReminderTime(remHour, m); }} style={ssStyles.timeBtn}>
+                        <TouchableOpacity onPress={() => { const m = (remMinute - 5 + 60) % 60; setRemMinute(m); applyReminderTime(remHour, m); }} style={ssStyles.timeBtn} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
                           <Text style={ssStyles.timeBtnTxt}>▼</Text>
                         </TouchableOpacity>
                       </View>
@@ -953,6 +941,8 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                         key={k}
                         onPress={() => updSetting('language', k)}
                         style={[ssStyles.chip, settings.language === k && ssStyles.chipActive]}
+                        activeOpacity={0.7}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       >
                         <Text style={[ssStyles.chipTxt, settings.language === k && ssStyles.chipTxtActive]}>{l}</Text>
                       </TouchableOpacity>
@@ -983,6 +973,8 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                         key={k}
                         onPress={() => updSetting('paletteSize', k)}
                         style={[ssStyles.chip, ssStyles.chipSq, settings.paletteSize === k && ssStyles.chipActive]}
+                        activeOpacity={0.7}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                       >
                         <Text style={[ssStyles.chipTxt, settings.paletteSize === k && ssStyles.chipTxtActive]}>{l}</Text>
                       </TouchableOpacity>
@@ -1030,6 +1022,7 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                           style={[ssStyles.keyBtn, !k && { backgroundColor: 'transparent', borderWidth: 0 }]}
                           disabled={!k}
                           activeOpacity={0.7}
+                          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                         >
                           <Text style={ssStyles.keyBtnTxt}>{k}</Text>
                         </TouchableOpacity>
@@ -1061,6 +1054,8 @@ function SettingsSheet({ settings, updSetting, profile, userId, onProfileUpdate,
                     key={item.label}
                     style={[ssStyles.menuRow, i === arr.length - 1 && { borderBottomWidth: 0 }]}
                     onPress={() => Alert.alert(item.label, '준비 중이에요')}
+                    activeOpacity={0.7}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                   >
                     <View style={{ flex: 1 }}>
                       <Text style={ssStyles.menuLabel}>{item.label}</Text>
@@ -1104,6 +1099,8 @@ function AccountField({ label, value, editField, fieldKey, setEditField, onSave,
             onPress={() => onSave(editField.value)}
             style={ssStyles.fieldSaveBtn}
             disabled={saving}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           >
             <Text style={{ color: C.bg, fontSize: 12, fontWeight: '700' }}>
               {saving ? '...' : '저장'}
@@ -1113,7 +1110,7 @@ function AccountField({ label, value, editField, fieldKey, setEditField, onSave,
       ) : (
         <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flex: multiline ? 0 : 1, width: multiline ? '100%' : undefined }}>
           <Text style={ssStyles.fieldValue}>{value || <Text style={{ color: C.dim }}>{placeholder ?? '미입력'}</Text>}</Text>
-          <TouchableOpacity onPress={() => setEditField({ key: fieldKey, value })}>
+          <TouchableOpacity onPress={() => setEditField({ key: fieldKey, value })} activeOpacity={0.7} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
             <Text style={ssStyles.editBtnTxt}>변경</Text>
           </TouchableOpacity>
         </View>
@@ -1134,7 +1131,7 @@ const styles = StyleSheet.create({
 
   gearBtn: {
     position: 'absolute', top: 28, right: 20,
-    width: 34, height: 34, borderRadius: 17,
+    minWidth: 44, minHeight: 44, borderRadius: 22,
     backgroundColor: C.surface, borderWidth: 1, borderColor: C.border,
     alignItems: 'center', justifyContent: 'center', zIndex: 1,
   },
@@ -1152,7 +1149,6 @@ const styles = StyleSheet.create({
   avatarOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
   profileName:   { fontSize: 18, fontWeight: '700', color: C.text, letterSpacing: -0.36 },
   profileHandle: { fontSize: 12, color: C.muted, marginTop: 2 },
-  profileBio:    { fontSize: 13, color: C.dim, lineHeight: 20, marginBottom: 10 },
 
   profileStats:    { flexDirection: 'row', gap: 24 },
   profileStat:     { alignItems: 'center' },
@@ -1237,9 +1233,9 @@ const ssStyles = StyleSheet.create({
   // 헤더
   header:      { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, paddingTop: 14, paddingBottom: 10, gap: 10 },
   headerTitle: { flex: 1, fontSize: 16, fontWeight: '700', color: C.text },
-  backBtn:     { marginRight: 4 },
+  backBtn:     { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center', marginRight: 4 },
   backBtnTxt:  { color: C.muted, fontSize: 22, lineHeight: 24 },
-  closeBtn:    { width: 28, height: 28, borderRadius: 14, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  closeBtn:    { minWidth: 44, minHeight: 44, borderRadius: 22, backgroundColor: C.surface, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
   closeBtnTxt: { color: C.muted, fontSize: 14, lineHeight: 16 },
 
   body: { paddingHorizontal: 20 },
@@ -1265,7 +1261,7 @@ const ssStyles = StyleSheet.create({
   avatarCircleOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
 
   // 계정 필드
-  fieldLabel:         { fontSize: 10, color: C.muted, letterSpacing: 0.6, textTransform: 'uppercase' },
+  fieldLabel:         { fontSize: 10, color: C.muted, letterSpacing: 0.6, textTransform: 'uppercase', minWidth: 30 },
   fieldValue:         { fontSize: 14, color: C.text },
   editBtnTxt:         { fontSize: 11, color: C.muted },
   fieldInput:         { flex: 1, backgroundColor: C.card, borderWidth: 1, borderColor: C.border2, borderRadius: R.sm, paddingHorizontal: 10, paddingVertical: 8, color: C.text, fontSize: 13 },
@@ -1283,7 +1279,7 @@ const ssStyles = StyleSheet.create({
   // 알림 시간
   timePicker: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   timeUnit:   { alignItems: 'center', gap: 4 },
-  timeBtn:    { padding: 6 },
+  timeBtn:    { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
   timeBtnTxt: { color: C.muted, fontSize: 12 },
   timeValue:  { color: C.text, fontSize: 26, fontWeight: '700', minWidth: 44, textAlign: 'center' },
   timeSep:    { color: C.text, fontSize: 26, fontWeight: '700', marginBottom: 4 },

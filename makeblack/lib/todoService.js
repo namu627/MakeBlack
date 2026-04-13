@@ -17,10 +17,7 @@ export const createCategory = async (userId, name, color) => {
     .insert({ user_id: userId, name, color, sort_order: 0 })
     .select()
     .single();
-  if (error) {
-    console.log('createCategory 에러:', JSON.stringify(error));
-    throw error;
-  }
+  if (error) throw error;
   return data;
 };
 
