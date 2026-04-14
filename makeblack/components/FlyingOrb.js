@@ -2,10 +2,15 @@ import { useEffect, useRef } from 'react';
 import { Animated, View, StyleSheet } from 'react-native';
 
 function calcBezierKeyframes(sx, sy, tx, ty, steps) {
-  const cx1 = sx + (tx - sx) * 0.3;
-  const cy1 = Math.min(sy, ty) - Math.abs(tx - sx) * 0.25;
-  const cx2 = sx + (tx - sx) * 0.7;
-  const cy2 = Math.min(sy, ty) - Math.abs(tx - sx) * 0.1;
+  const dx = tx - sx;
+  const dy = ty - sy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  // 경로 길이의 25% 높이로 위쪽 호(arc)를 그림, 최대 80px
+  const arcH = Math.min(dist * 0.25, 80);
+  const cx1 = sx + dx * 0.25;
+  const cy1 = sy + dy * 0.25 - arcH;
+  const cx2 = sx + dx * 0.75;
+  const cy2 = sy + dy * 0.75 - arcH * 0.4;
   const pts = [];
   for (let i = 0; i <= steps; i++) {
     const t = i / steps;

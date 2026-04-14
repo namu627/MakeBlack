@@ -598,6 +598,11 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
 
   // ── 파생 값 ──────────────────────────────────────────
   const members       = detail?.team_members ?? [];
+  // user_id → member 맵 (O(1) 조회용) — toggle마다 find() 반복 방지
+  const membersMap    = useMemo(
+    () => Object.fromEntries(members.map(m => [m.user_id, m])),
+    [members],
+  );
   const isOwner       = detail?.created_by === userId;
   const myColorIndex  = detail?.team_members?.find(m => m.user_id === userId)?.color_index ?? 0;
   const myColor       = getMemberColor(myColorIndex) ?? { hue: 220, color: '#6c8fff' };
@@ -669,7 +674,11 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
       .on('postgres_changes', {
         event: '*', schema: 'public', table: 'team_todos',
         filter: `team_id=eq.${team.id}`,
-      }, () => loadTodos())
+      }, () => {
+        // 낙관적 업데이트 진행 중이면 스킵 — loadTodos가 덮어쓰기 방지
+        if (pendingTodoIds.current.size > 0) return;
+        loadTodos();
+      })
       .on('postgres_changes', {
         event: '*', schema: 'public', table: 'team_palette_history',
         filter: `team_id=eq.${team.id}`,
@@ -730,13 +739,13 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
     if (willDone) {
       // 중복 drop 방지
       if (!newDrops.some(d => d.id === todo.id)) {
-        // 담당자 > 작성자 > 현재 유저 순으로 colorIndex 결정
+        // 담당자 > 작성자 > 현재 유저 순으로 colorIndex 결정 (membersMap O(1) 조회)
         const assigneeIdx = (() => {
           if (todo.assignee_id) {
-            const m = members.find(m => m.user_id === todo.assignee_id);
+            const m = membersMap[todo.assignee_id];
             if (m) return m.color_index;
           }
-          const author = members.find(m => m.user_id === todo.author_id);
+          const author = membersMap[todo.author_id];
           return author ? author.color_index : myColorIndex;
         })();
 
@@ -1411,11 +1420,8 @@ function TeamDetailScreen({ team, userId, onBack, onRefresh }) {
   const renderTodoItem = (todo) => {
     const isDone = todo.done;
 
-    // 담당자 또는 작성자 색상
-    const targetMember = (() => {
-      if (todo.assignee_id) return members.find(m => m.user_id === todo.assignee_id);
-      return members.find(m => m.user_id === todo.author_id);
-    })();
+    // 담당자 또는 작성자 색상 (membersMap O(1) 조회)
+    const targetMember = membersMap[todo.assignee_id] ?? membersMap[todo.author_id];
     const assigneeColor = targetMember
       ? getMemberColor(targetMember?.color_index)?.color ?? '#888888'
       : myColor?.color ?? '#888888';

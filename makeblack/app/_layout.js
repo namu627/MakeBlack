@@ -34,10 +34,10 @@ export default function RootLayout() {
 
   useEffect(() => {
     // 현재 세션 확인
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      setInitialized(true);
-    });
+    supabase.auth.getSession()
+      .then(({ data: { session } }) => { setSession(session); })
+      .catch(() => {}) // 네트워크 에러 시 세션 없는 것으로 처리
+      .finally(() => setInitialized(true));
 
     // 세션 변경 감지 — SIGNED_OUT(토큰 만료 포함) 시 즉시 로그인으로
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -57,6 +57,7 @@ export default function RootLayout() {
         ]);
         if (raw && savedPin) {
           const s = JSON.parse(raw);
+          // pinLock 설정이 켜져 있고 저장된 PIN이 있을 때만 잠금
           if (s.pinLock) {
             setStoredPin(savedPin);
             setPinLocked(true);

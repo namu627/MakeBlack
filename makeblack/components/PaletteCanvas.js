@@ -139,7 +139,7 @@ function renderFull(drops, total) {
   cachedDropCount = drops.length;
 }
 
-// ── animDrop — 애니메이션 레이어 (FRAMES=45, maxR=0.42) ──
+// ── animDrop — 애니메이션 레이어 (FRAMES=55, maxR=0.42) ──
 let raf = null;
 function animateDrop(drop) {
   if (raf) cancelAnimationFrame(raf);
@@ -149,7 +149,7 @@ function animateDrop(drop) {
   const cornerDist = Math.sqrt(Math.max(cx, S - cx) ** 2 + Math.max(cy, S - cy) ** 2);
   const maxR = cornerDist * 0.42;
   let frame = 0;
-  const FRAMES = 45;
+  const FRAMES = 55;
 
   function draw() {
     actx.clearRect(0, 0, S, S);
@@ -231,7 +231,11 @@ export default function PaletteCanvas({
 
   const send = (data) => {
     if (!webviewRef.current) return;
-    webviewRef.current.postMessage(JSON.stringify(data));
+    try {
+      webviewRef.current.postMessage(JSON.stringify(data));
+    } catch (_) {
+      // WebView 언마운트 직후 호출 시 예외 무시
+    }
   };
 
   // 마운트 후 초기 렌더

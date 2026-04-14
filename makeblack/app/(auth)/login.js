@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity,
   StyleSheet, KeyboardAvoidingView, Platform,
-  ActivityIndicator,
+  ActivityIndicator, Alert,
 } from 'react-native';
 import { router } from 'expo-router';
 import { supabase } from '../../lib/supabase';
@@ -28,7 +28,14 @@ export default function LoginScreen() {
     setLoading(false);
 
     if (err) {
-      setError('이메일 또는 비밀번호가 올바르지 않아요');
+      // Supabase 에러 코드별 구체적인 메시지
+      if (err.message?.includes('Email not confirmed')) {
+        setError('이메일 인증이 필요해요. 받으신 인증 메일을 확인해주세요');
+      } else if (err.message?.includes('Invalid login credentials')) {
+        setError('이메일 또는 비밀번호가 올바르지 않아요');
+      } else {
+        setError('로그인에 실패했어요. 잠시 후 다시 시도해주세요');
+      }
     }
     // 성공 시 _layout.js의 onAuthStateChange가 자동으로 탭 화면으로 이동
   };
@@ -87,7 +94,26 @@ export default function LoginScreen() {
           <TouchableOpacity onPress={() => router.push('/(auth)/signup')}>
             <Text style={styles.linkText}>계정이 없으신가요? <Text style={styles.linkBold}>회원가입</Text></Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={() => {}}>
+          <TouchableOpacity onPress={() =>
+            Alert.alert('비밀번호 재설정', '가입하신 이메일 주소를 이메일 입력란에 입력 후 아래 버튼을 눌러주세요', [
+              { text: '취소', style: 'cancel' },
+              {
+                text: '재설정 메일 발송',
+                onPress: async () => {
+                  if (!email) {
+                    Alert.alert('이메일 입력 필요', '위 이메일 입력란에 가입한 이메일을 먼저 입력해주세요');
+                    return;
+                  }
+                  const { error: resetErr } = await supabase.auth.resetPasswordForEmail(email);
+                  if (resetErr) {
+                    Alert.alert('발송 실패', '잠시 후 다시 시도해주세요');
+                  } else {
+                    Alert.alert('발송 완료', `${email}로 재설정 링크를 보냈어요`);
+                  }
+                },
+              },
+            ])
+          }>
             <Text style={styles.linkMuted}>비밀번호를 잊으셨나요?</Text>
           </TouchableOpacity>
         </View>

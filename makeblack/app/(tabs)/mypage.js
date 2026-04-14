@@ -201,12 +201,25 @@ export default function MyPageScreen() {
       const monthStart  = `${year}-${String(month + 1).padStart(2, '0')}-01`;
       const monthEnd    = `${year}-${String(month + 1).padStart(2, '0')}-${String(daysInMonth).padStart(2, '0')}`;
 
-      const { data, error } = await supabase
-        .from('palette_history')
-        .select('date, drops, total')
-        .eq('user_id', userId)
-        .gte('date', monthStart)
-        .lte('date', monthEnd);
+      // 월간 데이터 + streak 데이터 병렬 조회
+      const today = dateKey();
+      const sDate = new Date(today + 'T00:00:00');
+      sDate.setDate(sDate.getDate() - 60);
+
+      const [{ data, error }, { data: sData }] = await Promise.all([
+        supabase
+          .from('palette_history')
+          .select('date, drops, total')
+          .eq('user_id', userId)
+          .gte('date', monthStart)
+          .lte('date', monthEnd),
+        supabase
+          .from('palette_history')
+          .select('date, drops, total')
+          .eq('user_id', userId)
+          .gte('date', dateKey(sDate))
+          .lte('date', today),
+      ]);
       if (error) throw error;
 
       const rows = data ?? [];
@@ -242,16 +255,7 @@ export default function MyPageScreen() {
         cells.push({ day, dk, prog, isBlack, hasData: total > 0 });
       }
 
-      // streak — 지난달 포함 60일
-      const today = dateKey();
-      const sDate = new Date(today + 'T00:00:00');
-      sDate.setDate(sDate.getDate() - 60);
-      const { data: sData } = await supabase
-        .from('palette_history')
-        .select('date, drops, total')
-        .eq('user_id', userId)
-        .gte('date', dateKey(sDate))
-        .lte('date', today);
+      // streak 계산 (위에서 병렬로 받아온 sData 사용)
       const allRows = sData ?? [];
       const allRowMap = Object.fromEntries(allRows.map(r => [r.date, r]));
       let streak = 0;

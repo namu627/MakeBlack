@@ -123,6 +123,7 @@ export default function HomeScreen() {
 
   // ── 팔레트 / 색상 ────────────────────────────────────
   const [animDrop, setAnimDrop]     = useState(null);
+  const animDropRef                 = useRef(null); // handleAnimDone 클로저 stale 방지
   const [canvasVer, setCanvasVer]   = useState(0);
   const [usedHues, setUsedHues]     = useState([]);
 
@@ -205,12 +206,7 @@ export default function HomeScreen() {
   const [blackPhase, setBlackPhase] = useState(null); // null | 'in' | 'text' | 'orb' | 'stamp'
   const blackFadeAnim  = useRef(new Animated.Value(0)).current;
   const blackTextAnim  = useRef(new Animated.Value(0)).current;
-  const blackScaleAnim = useRef(new Animated.Value(1.04)).current;
-  const blackOrbAnim   = useRef(new Animated.Value(1)).current; // 1=white, 0=black
-  const blackPulseAnim = useRef(new Animated.Value(1)).current;
   const blackTimer     = useRef(null);
-  const prevIsBlack    = useRef(false);
-  const pulseLoop      = useRef(null);
 
   // ── Flying Orb ───────────────────────────────────────
   const [flyOrb, setFlyOrb] = useState(null); // { sx, sy, tx, ty }
@@ -267,16 +263,19 @@ export default function HomeScreen() {
   // ─────────────────────────────────────────────────────
 
   useEffect(() => { selectedDateRef.current = selectedDate; }, [selectedDate]);
+  useEffect(() => { animDropRef.current = animDrop; }, [animDrop]);
 
-  // 자정 날짜 자동 갱신
+  // 자정 날짜 자동 갱신 — ref로 최신값 읽어 interval 재생성 없이 동작
+  const todayKeyRef = useRef(todayKey_state);
+  useEffect(() => { todayKeyRef.current = todayKey_state; }, [todayKey_state]);
   useEffect(() => {
     const tick = () => {
       const nk = getTodayKey();
-      if (nk !== todayKey_state) setTodayKey_state(nk);
+      if (nk !== todayKeyRef.current) setTodayKey_state(nk);
     };
     const id = setInterval(tick, 60000);
     return () => clearInterval(id);
-  }, [todayKey_state]);
+  }, []); // 마운트 1회만 생성 — 자정에 interval 재생성 없음
 
   // 세션 로드
   useEffect(() => {
@@ -290,7 +289,6 @@ export default function HomeScreen() {
     setUsedHues([]);
     setBlackPhase(null);
     clearTimeout(blackTimer.current);
-    prevIsBlack.current = false;
     setAnimDrop(null);
     setCanvasVer(v => v + 1);
   }, [selectedDate]);
@@ -452,7 +450,6 @@ export default function HomeScreen() {
       blackShownDates.current.delete(`${selectedDate}:${totalCount}`);
       setBlackPhase(null);
       clearTimeout(blackTimer.current);
-      prevIsBlack.current = false;
     }
 
     const newTotal = todos.length; // 전체 할일 수는 불변
@@ -579,18 +576,21 @@ export default function HomeScreen() {
   const handleSaveEdit = async () => {
     if (!editingId) return;
     const text = editingText.trim();
-    setEditingId(null);
-    if (!text) return;
+    if (!text) { setEditingId(null); return; }
 
-    setTodos(prev => prev.map(t =>
-      t.id === editingId ? { ...t, text } : t,
-    ));
+    // 롤백용 이전 텍스트 저장
+    const prevText  = todos.find(t => t.id === editingId)?.text ?? '';
+    const targetId  = editingId; // 클로저에 고정
+
+    setEditingId(null);
+    setTodos(prev => prev.map(t => t.id === targetId ? { ...t, text } : t));
 
     try {
-      await updateTodoText(editingId, text);
+      await updateTodoText(targetId, text);
     } catch (_) {
-      // 서버 실패 시 재로드
-      loadData();
+      // 서버 실패 시 로컬 상태 롤백
+      setTodos(prev => prev.map(t => t.id === targetId ? { ...t, text: prevText } : t));
+      Alert.alert('오류', '수정에 실패했어요');
     }
   };
 
@@ -648,8 +648,8 @@ export default function HomeScreen() {
     const map = {};
     categories.forEach(c => { map[c.id] = []; });
     todos.forEach(t => {
+      // 존재하는 카테고리에만 추가 — 삭제된 카테고리의 orphan todo 무시
       if (map[t.cat_id]) map[t.cat_id].push(t);
-      else map[t.cat_id] = [t];
     });
     return map;
   }, [categories, todos]);
@@ -1095,8 +1095,9 @@ export default function HomeScreen() {
   const blackShownDates = useRef(new Set());
 
   // PaletteCanvas onAnimDone 콜백 ── animDrop 정리 + BLACK 체크
+  // animDropRef로 최신값을 읽어 deps에서 animDrop 제거 → PaletteCanvas 불필요 리렌더 방지
   const handleAnimDone = useCallback(() => {
-    const wasLast = animDrop?.isLast;
+    const wasLast = animDropRef.current?.isLast;
     setAnimDrop(null);
     if (!wasLast) return;
     if (!settings.blackAnimationOn) return;
@@ -1104,7 +1105,7 @@ export default function HomeScreen() {
       blackShownDates.current.add(`${selectedDate}:${totalCount}`);
       setBlackPhase('in');
     }
-  }, [animDrop, selectedDate, totalCount, settings.blackAnimationOn]);
+  }, [selectedDate, totalCount, settings.blackAnimationOn]);
 
   // ─────────────────────────────────────────────────────
   // 5단계 ▼ BLACK 달성 페이즈 관리
@@ -1149,13 +1150,19 @@ export default function HomeScreen() {
   // 'orb' — measureInWindow로 선택 셀 중심 좌표 결정 (실제 레이아웃 기반)
   useEffect(() => {
     if (blackPhase !== 'orb') return;
-    const measure = () => {
+    let cancelled = false;
+    const tryMeasure = (attempt = 0) => {
+      if (cancelled) return;
       if (targetCellRef.current) {
         targetCellRef.current.measureInWindow((x, y, width, height) => {
+          if (cancelled) return;
           if (width > 0 && height > 0) {
             setFlyOrb({ toX: x + width / 2, toY: y + height / 2 });
+          } else if (attempt < 3) {
+            // Android에서 Modal 뒤 뷰 측정 실패 시 재시도
+            setTimeout(() => tryMeasure(attempt + 1), 80);
           } else {
-            // measureInWindow 실패 시 수학 계산으로 fallback
+            // fallback: 수학 계산
             const pos = getTargetCellPos(selectedDate);
             setFlyOrb({ toX: pos.x, toY: pos.y });
           }
@@ -1166,8 +1173,8 @@ export default function HomeScreen() {
       }
     };
     // 캘린더 스프링 애니메이션이 완전히 정착한 뒤 측정 (레이아웃 안정화)
-    const t = setTimeout(measure, 80);
-    return () => clearTimeout(t);
+    const t = setTimeout(() => tryMeasure(0), 100);
+    return () => { cancelled = true; clearTimeout(t); };
   }, [blackPhase]);
 
   // 'stamp' — 스탬프 리플 + 오버레이 페이드아웃
@@ -1244,9 +1251,12 @@ export default function HomeScreen() {
   // ── CalendarMiniPalette ─ 캘린더 셀 안 미니 팔레트 ──
   // 성능상 Canvas 대신 색상 blob 근사 렌더링
   const renderCalendarMiniPalette = (drops, totalCount, isDone, size = 30) => {
+    // drops.length=0, totalCount=0 이면 0/0 → NaN 방지
     const opacity = isDone
       ? 1
-      : 0.35 + (drops.length / (totalCount || drops.length)) * 0.65;
+      : drops.length === 0
+        ? 0.35
+        : 0.35 + (drops.length / (totalCount || drops.length)) * 0.65;
 
     // 최대 4 drop, 사분면 배치
     const positions = [

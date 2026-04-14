@@ -255,7 +255,7 @@ export const findTeamByCode = async (code) => {
 export const searchUsers = async (query) => {
   // PostgREST .or() 필터 문자열에 사용자 입력이 직접 삽입되므로
   // 쉼표·괄호 등 필터 구문을 깨는 문자를 제거
-  const safe = query.replace(/[,.()\[\]]/g, '').trim();
+  const safe = query.replace(/[,.()\[\]]/g, '').trim().slice(0, 50);
   if (!safe) return [];
   const { data, error } = await supabase
     .from('users')

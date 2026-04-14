@@ -46,15 +46,17 @@ export const mixRgbList = (rgbList, totalCount = null) => {
 };
 
 // ── 고유 색상 생성 (makeblack.jsx 동일) ────────────────
-// usedHues: 이미 사용된 hue 배열 — 28도 이상 차이 보장
+// usedHues: 이미 사용된 hue 배열 — 최대 28도 간격 보장 (많아질수록 동적으로 완화)
 export const generateUniqueColor = (usedHues = []) => {
+  // 색상이 많을수록 최소 간격을 줄여 항상 고유색 반환 (최소 10도 보장)
+  const minGap = Math.max(10, 28 - Math.floor(usedHues.length / 4) * 4);
   let hue, tries = 0;
   do {
     hue = Math.floor(Math.random() * 360);
     tries++;
   } while (
-    usedHues.some(h => Math.min(Math.abs(h - hue), 360 - Math.abs(h - hue)) < 28) &&
-    tries < 100
+    usedHues.some(h => Math.min(Math.abs(h - hue), 360 - Math.abs(h - hue)) < minGap) &&
+    tries < 200
   );
   const rgb = hslToRgb(hue, 82, 54);
   return { hue, rgb, color: `hsl(${hue},82%,54%)` };
